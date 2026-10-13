@@ -1,26 +1,42 @@
 "use client"
 
 import * as React from "react"
-import { GlassObject, GlassPane, GlassSheet, LIQUIDS, LiquidCanvas, type LiquidRecipe } from "@/components/ui/glass-object"
+import {
+  GlassObject,
+  GlassPane,
+  GlassSheet,
+  LIQUIDS,
+  LiquidCanvas,
+  useGlass,
+  useSpringVar,
+  type LiquidRecipe,
+} from "@/components/ui/glass-object"
 import { rng } from "@/components/ui/glass-folder-cards"
 import { WIDGET, type WidgetSize } from "../glass"
 import { useWindowManager } from "../window-manager"
 
 /**
- * Weather — the sky as an object.
+ * Weather — the macOS Weather widget, made as a glass object.
  *
- * Three layers: a sky liquid at the back (pale sky by day, smoke by night),
- * real weather in the middle (a sun with a halo, two SVG clouds; at night a
- * moon and a few stars) with the big temperature standing in it, and a frosted
- * pane carrying the city, the condition and the day's range.
+ * At rest it reads exactly like the native widget: city with a location
+ * arrow, the big light temperature, the condition glyph, the condition and
+ * the day's range; medium adds the hourly row on the right, large the hourly
+ * row and a six-day list with range bars.
  *
- * - **Rest**: the sun sits low behind the pane, the clouds drift very slowly
- *   (a rAF drift written by ref, still under reduced motion).
- * - **Hover**: the sun rises a few px, the clouds part to either side, the
- *   pane leans.
- * - **Open** (click): the pane folds down and away and the forecast rises out
- *   of the pocket: hourly chips (small), a 5-day strip (medium), a 6-day list
- *   of sheets with range bars (large).
+ * Layers, back to front: the sky as a liquid light (pale sky by day, smoke by
+ * night) that casts through a frosted pane hinged on its bottom edge; the
+ * current conditions standing in front of the pane, with a real sun, moon and
+ * clouds; and a pocket at the bottom holding the forecast.
+ *
+ * - **Hover**: the object lifts, the pane leans back, the sun rises 4px and
+ *   the clouds part. The sky's light lags the tilt on a slow pendulum
+ *   (`--slosh`, k=18 c=2.6, chasing px·hover).
+ * - **Open** (click): the pane hinges down and away, the temperature shrinks
+ *   toward the top, and the forecast comes up out of the pocket: six hourly
+ *   chips, 140ms apart, each caught on an arc by a spring (k=200 c=13) and
+ *   squashing a pixel as it lands (small); the right half turns over on its
+ *   axle to the five-day outlook (medium, `--plaque`); six day rows rise as
+ *   sheets over the list (large). Close reverses it.
  * - **Activate** (double-click, Enter): the Weather app.
  *
  * The numbers are the Weather app's: Cupertino, 54° to 72°, the same hourly
@@ -226,42 +242,25 @@ function Glyph({ condition, size = 18 }: { condition: Condition; size?: number }
   )
 }
 
+
+const CLOUD_VIEW = "3.5 8 25.5 18.5"
+
 function Arrow() {
   return (
-    <svg viewBox="0 0 10 10" width="8" height="8" className="wo-arrow" aria-hidden="true">
+    <svg viewBox="0 0 10 10" width="9" height="9" className="wo-arrow" aria-hidden="true">
       <path d="M9.2.8 1 4.4l3.6 1 1 3.6z" />
     </svg>
   )
 }
 
 // ---------------------------------------------------------------------------
-// The sky: sun or moon, stars, two clouds. Motion is CSS variables only; the
-// slow drift is one rAF loop writing three numbers to the sky element.
+// The sky glyph: a real sun (or moon) and real clouds, ~28px. On hover the sun
+// rises 4px and the clouds part; on open the whole glyph rides to the top.
 
-const STARS = (() => {
-  const r = rng(4127)
-  return Array.from({ length: 14 }, (_, i) => ({
-    x: Math.round(r() * 940 + 30) / 10,
-    y: Math.round(r() * 520 + 30) / 10,
-    s: Math.round((r() * 1.1 + 0.9) * 10) / 10,
-    g: i % 2,
-  }))
-})()
-
-type Spot = { x: number; y: number; d: number }
-type CloudSpec = { x: number; y: number; w: number; side: -1 | 1; back?: boolean }
-
-function Cloud({ spec, phase }: { spec: CloudSpec; phase: "a" | "b" }) {
+function SkyCloud({ className, w }: { className: string; w: number }) {
   const id = "wo" + React.useId().replace(/[^a-zA-Z0-9_-]/g, "")
   return (
-    <svg
-      viewBox="3.5 8 25.5 18.5"
-      width={spec.w}
-      height={Math.round(spec.w * 0.725)}
-      className={"wo-cloud" + (spec.back ? " wo-cloud-back" : "")}
-      style={{ left: spec.x, top: spec.y, "--side": spec.side, "--drift": `var(--wo-drift-${phase})` } as React.CSSProperties}
-      aria-hidden="true"
-    >
+    <svg viewBox={CLOUD_VIEW} width={w} height={Math.round(w * 0.725)} className={"wo-sg-cloud " + className} aria-hidden="true">
       <defs>
         <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" className="wo-c0" />
@@ -273,87 +272,153 @@ function Cloud({ spec, phase }: { spec: CloudSpec; phase: "a" | "b" }) {
   )
 }
 
-function Sky({
-  night,
-  sun,
-  clouds,
-  openRise,
-  openScale,
-}: {
-  night: boolean
-  sun: Spot
-  clouds: [CloudSpec, CloudSpec]
-  openRise: number
-  openScale: number
-}) {
-  const ref = React.useRef<HTMLDivElement>(null)
-  React.useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-    const write = (t: number) => {
-      el.style.setProperty("--wo-drift-a", Math.sin(t * 0.11).toFixed(3))
-      el.style.setProperty("--wo-drift-b", Math.sin(t * 0.083 + 2.1).toFixed(3))
-      el.style.setProperty("--wo-tw", (0.5 + 0.5 * Math.sin(t * 1.4)).toFixed(3))
-    }
-    write(0)
-    if (reduce) return
-    let raf = 0
-    let last = 0
-    let visible = true
-    const frame = (now: number) => {
-      raf = 0
-      if (!visible || document.hidden) return
-      if (now - last >= 1000 / 30) {
-        last = now
-        write(now / 1000)
-      }
-      raf = requestAnimationFrame(frame)
-    }
-    const io =
-      typeof IntersectionObserver !== "undefined"
-        ? new IntersectionObserver((es) => {
-            visible = es.some((e) => e.isIntersecting)
-            if (visible && !raf) raf = requestAnimationFrame(frame)
-          })
-        : null
-    io?.observe(el)
-    const onVis = () => {
-      if (!document.hidden && !raf) raf = requestAnimationFrame(frame)
-    }
-    document.addEventListener("visibilitychange", onVis)
-    raf = requestAnimationFrame(frame)
-    return () => {
-      cancelAnimationFrame(raf)
-      io?.disconnect()
-      document.removeEventListener("visibilitychange", onVis)
-    }
-  }, [])
-
-  const body = night ? Math.round(sun.d * 0.72) : sun.d
-  const bodyStyle = {
-    left: sun.x + Math.round((sun.d - body) / 2),
-    top: sun.y + Math.round((sun.d - body) / 2),
-    width: body,
-    height: body,
-    "--open-rise": openRise + "px",
-    "--open-scale": openScale,
-  } as React.CSSProperties
+function SkyGlyph({ condition, className }: { condition: Condition; className: string }) {
+  const sun = condition === "sunny" || condition === "partly-cloudy"
+  const moon = condition === "night" || condition === "night-cloudy"
+  const cloudy = condition !== "sunny" && condition !== "night"
   return (
-    <div ref={ref} className="wo-sky" aria-hidden="true">
-      {night ? (
+    <div className={"wo-sg " + className + (cloudy ? " wo-sg-cloudy" : "")} aria-hidden="true">
+      {sun ? <div className="wo-sg-sun" /> : null}
+      {moon ? <div className="wo-sg-moon" /> : null}
+      {cloudy ? (
         <>
-          {STARS.map((s, i) => (
-            <span key={i} className={"wo-star wo-star-" + s.g} style={{ left: s.x + "%", top: s.y + "%", width: s.s, height: s.s }} />
-          ))}
-          <div className="wo-moon" style={{ ...bodyStyle, boxShadow: `inset ${Math.round(body * 0.24)}px ${-Math.round(body * 0.1)}px 0 0 #f3ecd2` }} />
+          <SkyCloud className="wo-sg-back" w={15} />
+          <SkyCloud className="wo-sg-front" w={21} />
         </>
-      ) : (
-        <div className="wo-sun" style={bodyStyle} />
-      )}
-      <Cloud spec={clouds[0]} phase="a" />
-      <Cloud spec={clouds[1]} phase="b" />
+      ) : null}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The pocket: forecast pieces that rise out of the bottom edge and are caught
+// by a spring in their slots. One rAF loop, written straight to the DOM.
+
+type Slot = { x: number; y: number; r: number }
+
+/** Slots on the lower arc of a circle, each tilted to `lean` of the tangent. */
+function arcSlots(cx: number, cy: number, r: number, from: number, to: number, n: number, lean: number): Slot[] {
+  const r2 = (v: number) => Math.round(v * 100) / 100
+  return Array.from({ length: n }, (_, i) => {
+    const a = ((from + ((to - from) * i) / (n - 1)) * Math.PI) / 180
+    const tangent = (Math.atan2(-Math.cos(a), -Math.sin(a)) * 180) / Math.PI
+    return { x: r2(cx + r * Math.cos(a)), y: r2(cy - r * Math.sin(a)), r: r2(tangent * lean) }
+  })
+}
+
+type Pocket = { w: number; h: number; slots: Slot[]; /** stagger between pieces, ms */ gap: number; /** where they wait, below the edge */ from: number }
+
+const POCKETS: Record<"small" | "large", Pocket> = {
+  // six 26×40 chips on an arc of r=74 about (85, 50), between 220° and 320°
+  small: { w: 26, h: 40, slots: arcSlots(85, 50, 74, 220, 320, 6, 0.4), gap: 140, from: 200 },
+  // six day rows, Today on top
+  large: { w: 340, h: 26, slots: Array.from({ length: 6 }, (_, i) => ({ x: 182, y: 186 + i * 28, r: 0 })), gap: 70, from: 400 },
+}
+
+const pieceTransform = (x: number, y: number, w: number, h: number, r: number, sq: number) =>
+  `translate(${(x - w / 2).toFixed(2)}px, ${(y - h / 2).toFixed(2)}px) rotate(${r.toFixed(2)}deg) scale(1, ${(1 - sq / h).toFixed(4)})`
+
+type Piece = { x: number; y: number; vx: number; vy: number; rot: number; rv: number; o: number; ov: number; sq: number; sqv: number; up: boolean; at: number; landed: boolean }
+
+function usePocket(P: Pocket | null, els: React.RefObject<(HTMLDivElement | null)[]>, open: boolean) {
+  const first = React.useRef(true)
+  const state = React.useRef<{ ps: Piece[]; raf: number; last: number } | null>(null)
+  React.useEffect(() => {
+    if (!P) return
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+    if (!state.current) {
+      state.current = {
+        ps: P.slots.map((s) => ({ x: s.x, y: P.from, vx: 0, vy: 0, rot: 0, rv: 0, o: 0, ov: 0, sq: 0, sqv: 0, up: false, at: 0, landed: false })),
+        raf: 0,
+        last: 0,
+      }
+    }
+    const st = state.current
+    if (first.current) {
+      first.current = false
+      if (!open) return
+    }
+    const n = P.slots.length
+    const now = performance.now()
+    st.ps.forEach((p, i) => {
+      p.up = open
+      p.landed = false
+      // up: one by one; down: all together, the last one first
+      p.at = now + (open ? 120 + i * P.gap : (n - 1 - i) * 30)
+    })
+    const write = () => {
+      st.ps.forEach((p, i) => {
+        const el = els.current[i]
+        if (!el) return
+        el.style.transform = pieceTransform(p.x, p.y, P.w, P.h, p.rot, Math.max(-1.5, Math.min(1.5, p.sq)))
+        el.style.opacity = Math.max(0, Math.min(1, p.o)).toFixed(3)
+      })
+    }
+    if (reduce) {
+      st.ps.forEach((p, i) => {
+        const s = P.slots[i]
+        p.x = s.x
+        p.y = open ? s.y : P.from
+        p.rot = open ? s.r : 0
+        p.o = open ? 1 : 0
+      })
+      write()
+      return
+    }
+    const step = (t: number) => {
+      const dt = st.last ? Math.min(1 / 30, (t - st.last) / 1000) : 1 / 60
+      st.last = t
+      let active = false
+      st.ps.forEach((p, i) => {
+        const s = P.slots[i]
+        if (t < p.at) {
+          active = true
+          return
+        }
+        // caught by a stiff, bouncy spring on the way up; let go more softly on the way down
+        const k = p.up ? 200 : 170
+        const c = p.up ? 13 : 22
+        const ty = p.up ? s.y : P.from
+        const tr = p.up ? s.r : 0
+        const prevY = p.y
+        p.vx += (-k * (p.x - s.x) - c * p.vx) * dt
+        p.vy += (-k * (p.y - ty) - c * p.vy) * dt
+        p.x += p.vx * dt
+        p.y += p.vy * dt
+        p.rv += (-k * (p.rot - tr) - c * p.rv) * dt
+        p.rot += p.rv * dt
+        p.ov += (-260 * (p.o - (p.up ? 1 : 0)) - 32 * p.ov) * dt
+        p.o += p.ov * dt
+        if (p.up && !p.landed && prevY > s.y && p.y <= s.y) {
+          // it overshoots its slot and drops back into it: a pixel of squash
+          p.landed = true
+          p.sqv += Math.min(34, Math.max(14, -p.vy * 0.08))
+        }
+        p.sqv += (-600 * p.sq - 30 * p.sqv) * dt
+        p.sq += p.sqv * dt
+        const moving =
+          Math.abs(p.y - ty) + Math.abs(p.vy) + Math.abs(p.rot - tr) + Math.abs(p.rv) > 0.02 ||
+          Math.abs(p.sq) + Math.abs(p.sqv) > 0.01 ||
+          Math.abs(p.o - (p.up ? 1 : 0)) + Math.abs(p.ov) > 0.004
+        if (moving) active = true
+        else {
+          p.y = ty
+          p.rot = tr
+          p.vy = p.rv = p.sq = p.sqv = p.ov = 0
+          p.o = p.up ? 1 : 0
+        }
+      })
+      write()
+      st.raf = active ? requestAnimationFrame(step) : 0
+      if (!st.raf) st.last = 0
+    }
+    if (!st.raf) st.raf = requestAnimationFrame(step)
+  }, [P, els, open])
+  React.useEffect(
+    () => () => {
+      if (state.current) cancelAnimationFrame(state.current.raf)
+    },
+    [],
   )
 }
 
@@ -362,11 +427,20 @@ function Sky({
 
 type Now = { temp: number; night: boolean; condition: Condition; clock: Clock }
 
-function Temp({ now, className }: { now: Now; className?: string }) {
+function Temp({ now }: { now: Now }) {
   return (
-    <div className={"wo-temp" + (className ? " " + className : "")}>
+    <div className="wo-temp">
       {now.temp}
       <span className="wo-deg">°</span>
+    </div>
+  )
+}
+
+function City() {
+  return (
+    <div className="wo-city">
+      {CITY}
+      <Arrow />
     </div>
   )
 }
@@ -385,13 +459,13 @@ function RangeBar({ lo, hi, min, max, dot }: { lo: number; hi: number; min: numb
   )
 }
 
-function HourRow({ hours, size }: { hours: Hour[]; size: number }) {
+function HourRow({ hours }: { hours: Hour[] }) {
   return (
     <ul className="wo-hours">
       {hours.map((h) => (
         <li key={h.key} className="wo-hour">
-          <span className="wo-hour-t go-mono">{h.label}</span>
-          <Glyph condition={h.condition} size={size} />
+          <span className="wo-hour-t">{h.label}</span>
+          <Glyph condition={h.condition} size={18} />
           <span className="wo-hour-v">{h.temp}°</span>
         </li>
       ))}
@@ -399,152 +473,185 @@ function HourRow({ hours, size }: { hours: Hour[]; size: number }) {
   )
 }
 
-/** Small: the sky, the big temperature, a pane with the city; open fans six hourly chips. */
-function Small({ now }: { now: Now }) {
-  const hours = hourly(now.clock, 6)
+function DayRow({ d, min, max, night, dot }: { d: Day; min: number; max: number; night: boolean; dot?: number }) {
   return (
     <>
-      <Sky
-        night={now.night}
-        sun={{ x: 98, y: 80, d: 58 }}
-        clouds={[
-          { x: 70, y: 52, w: 58, side: -1 },
-          { x: 116, y: 26, w: 44, side: 1, back: true },
-        ]}
-        openRise={-58}
-        openScale={0.3}
-      />
-      <div className="wo-stage">
-        <Temp now={now} className="wo-temp-small" />
-        <div className="wo-open-meta wo-open-meta-small go-mono">
-          H:{HI}° L:{LO}°
-        </div>
-        {hours.map((h, i) => {
-          const k = i - 2.5
-          return (
-            <div key={h.key} className="wo-chip wo-chip-hour" style={{ "--i": k, "--a": k * k } as React.CSSProperties}>
-              <span className="wo-chip-t go-mono">{h.label}</span>
-              <Glyph condition={h.condition} size={16} />
-              <span className="wo-chip-v">{h.temp}°</span>
-            </div>
-          )
-        })}
-      </div>
-      <GlassPane hinge="bottom" lean={-10} openLean={-80} openShift={18} openFade={0.9} radius={18} className="wo-pane wo-pane-small">
-        <div className="wo-label">
-          <span className="wo-city">
-            {CITY} <Arrow />
-          </span>
-          <span className="wo-cond">
-            {LABEL[now.condition]}
-            <span className="go-mono">
-              H:{HI}° L:{LO}°
-            </span>
-          </span>
-        </div>
-      </GlassPane>
+      <span className="wo-row-day">{d.label}</span>
+      <Glyph condition={dot !== undefined ? forNight(d.condition, night) : d.condition} size={18} />
+      <span className="wo-row-lo">{d.lo}°</span>
+      <RangeBar lo={d.lo} hi={d.hi} min={min} max={max} dot={dot} />
+      <span className="wo-row-hi">{d.hi}°</span>
     </>
   )
 }
 
-/** Medium: current conditions in the sky on the left; the hourly row on a pane at the right; open shows five days. */
+/** The current conditions: in front of the pane, so they stay when it hinges away. */
+function Current({ now }: { now: Now }) {
+  return (
+    <>
+      <City />
+      <Temp now={now} />
+      <SkyGlyph condition={now.condition} className="wo-now-glyph" />
+    </>
+  )
+}
+
+/** Printed on the pane: hinges away with it. */
+function Summary({ now }: { now: Now }) {
+  return (
+    <div className="wo-summary">
+      <span className="wo-cond">{LABEL[now.condition]}</span>
+      <span className="wo-hl go-mono">
+        H:{HI}° L:{LO}°
+      </span>
+    </div>
+  )
+}
+
+function Small({ now, open }: { now: Now; open: boolean }) {
+  const hours = hourly(now.clock, 6)
+  const els = React.useRef<(HTMLDivElement | null)[]>([])
+  const P = POCKETS.small
+  usePocket(P, els, open)
+  return (
+    <>
+      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} radius={22} frost={0.9} className="wo-pane">
+        <Summary now={now} />
+      </GlassPane>
+      <div className="wo-front">
+        <Current now={now} />
+      </div>
+      <div className="wo-pocket" aria-hidden="true">
+        {hours.map((h, i) => (
+          <div
+            key={h.key}
+            ref={(el) => {
+              els.current[i] = el
+            }}
+            className="wo-chip"
+            // the tops lean together: the outer chips lie over the inner ones
+            style={{ width: P.w, height: P.h, opacity: 0, zIndex: i < 3 ? 6 - i : i, transform: pieceTransform(P.slots[i].x, P.from, P.w, P.h, 0, 0) }}
+          >
+            <span className="wo-chip-t">{h.label}</span>
+            <Glyph condition={h.condition} size={14} />
+            <span className="wo-chip-v">{h.temp}°</span>
+          </div>
+        ))}
+      </div>
+    </>
+  )
+}
+
 function Medium({ now }: { now: Now }) {
   const hours = hourly(now.clock, 6)
   const days = forecast(now.clock, 6).slice(1)
   return (
     <>
-      <Sky
-        night={now.night}
-        sun={{ x: 120, y: 84, d: 64 }}
-        clouds={[
-          { x: 78, y: 70, w: 62, side: -1 },
-          { x: 112, y: 18, w: 50, side: 1, back: true },
-        ]}
-        openRise={-30}
-        openScale={0.15}
-      />
-      <div className="wo-stage">
-        <span className="wo-city wo-city-top">
-          {CITY} <Arrow />
-        </span>
-        <Temp now={now} className="wo-temp-medium" />
-        <div className="wo-side-meta">
-          <Glyph condition={now.condition} size={18} />
-          <span className="wo-cond-strong">{LABEL[now.condition]}</span>
-          <span className="wo-cond go-mono">
-            H:{HI}° L:{LO}°
-          </span>
-        </div>
-        {days.map((d, i) => (
-          <div key={d.key} className="wo-chip wo-chip-day" style={{ "--i": i - 2, "--a": (i - 2) * (i - 2) } as React.CSSProperties}>
-            <span className="wo-chip-t">{d.label}</span>
-            <Glyph condition={d.condition} size={20} />
-            <span className="wo-chip-v">{d.hi}°</span>
-            <span className="wo-chip-lo go-mono">{d.lo}°</span>
-          </div>
-        ))}
-      </div>
-      <GlassPane hinge="bottom" lean={-7} openLean={-82} openShift={16} openFade={0.92} radius={16} className="wo-pane wo-pane-medium">
-        <div className="wo-pane-head">
-          <span>Hourly</span>
-          <span className="go-mono">{LABEL[now.condition]}</span>
-        </div>
-        <HourRow hours={hours} size={20} />
+      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} radius={22} frost={0.9} className="wo-pane">
+        <Summary now={now} />
       </GlassPane>
+      <div className="wo-front">
+        <Current now={now} />
+        {/* the right half turns over on a horizontal axle */}
+        <div className="wo-flip" aria-hidden="true">
+          <div className="wo-spin">
+            <div className="wo-face wo-face-front">
+              <HourRow hours={hours} />
+            </div>
+            <div className="wo-face wo-face-back">
+              <ul className="wo-hours wo-days">
+                {days.map((d) => (
+                  <li key={d.key} className="wo-hour">
+                    <span className="wo-hour-t wo-day-t">{d.label}</span>
+                    <Glyph condition={d.condition} size={18} />
+                    <span className="wo-hour-v">
+                      {d.hi}°<span className="wo-day-lo">{d.lo}°</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
     </>
   )
 }
 
-/** Large: conditions at the top, the hourly row on the pane; open lifts a six-day list of sheets. */
-function Large({ now }: { now: Now }) {
+function Large({ now, open }: { now: Now; open: boolean }) {
   const hours = hourly(now.clock, 6)
   const days = forecast(now.clock, 6)
   const min = Math.min(...days.map((d) => d.lo))
   const max = Math.max(...days.map((d) => d.hi))
+  const els = React.useRef<(HTMLDivElement | null)[]>([])
+  const P = POCKETS.large
+  usePocket(P, els, open)
   return (
     <>
-      <Sky
-        night={now.night}
-        sun={{ x: 232, y: 108, d: 84 }}
-        clouds={[
-          { x: 194, y: 84, w: 84, side: -1 },
-          { x: 270, y: 30, w: 66, side: 1, back: true },
-        ]}
-        openRise={-80}
-        openScale={0.35}
-      />
-      <div className="wo-stage">
-        <span className="wo-city wo-city-top wo-city-large">
-          {CITY} <Arrow />
-        </span>
-        <Temp now={now} className="wo-temp-large" />
-        <div className="wo-side-meta wo-side-meta-large">
-          <Glyph condition={now.condition} size={18} />
-          <span className="wo-cond-strong">{LABEL[now.condition]}</span>
-          <span className="wo-cond go-mono">
-            H:{HI}° L:{LO}°
-          </span>
+      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} radius={22} frost={0.9} className="wo-pane">
+        <Summary now={now} />
+        <ul className="wo-list">
+          {days.map((d, i) => (
+            <li key={d.key} className="wo-row">
+              <DayRow d={d} min={min} max={max} night={now.night} dot={i === 0 ? now.temp : undefined} />
+            </li>
+          ))}
+        </ul>
+      </GlassPane>
+      <div className="wo-front">
+        <Current now={now} />
+        <div className="wo-hourly-large">
+          <HourRow hours={hours} />
         </div>
+      </div>
+      <div className="wo-pocket" aria-hidden="true">
         {days.map((d, i) => (
-          <GlassSheet key={d.key} className="wo-row" style={{ "--i": i, "--r": 5 - i } as React.CSSProperties}>
-            <span className="wo-row-day">{d.label}</span>
-            <Glyph condition={i === 0 ? forNight(d.condition, now.night) : d.condition} size={18} />
-            <span className="wo-row-lo go-mono">{d.lo}°</span>
-            <RangeBar lo={d.lo} hi={d.hi} min={min} max={max} dot={i === 0 ? now.temp : undefined} />
-            <span className="wo-row-hi go-mono">{d.hi}°</span>
-          </GlassSheet>
+          <div
+            key={d.key}
+            ref={(el) => {
+              els.current[i] = el
+            }}
+            className="wo-sheet-slot"
+            style={{ width: P.w, height: P.h, opacity: 0, transform: pieceTransform(P.slots[i].x, P.from, P.w, P.h, 0, 0) }}
+          >
+            <GlassSheet className="wo-sheet">
+              <DayRow d={d} min={min} max={max} night={now.night} dot={i === 0 ? now.temp : undefined} />
+            </GlassSheet>
+          </div>
         ))}
       </div>
-      <GlassPane hinge="bottom" lean={-7} openLean={-80} openShift={20} openFade={0.95} radius={18} className="wo-pane wo-pane-large">
-        <div className="wo-pane-head">
-          <span>Hourly Forecast</span>
-          <span className="go-mono">Feels like {now.temp >= 68 ? now.temp + 1 : now.temp - 1}°</span>
-        </div>
-        <HourRow hours={hours} size={24} />
-        <div className="wo-pane-foot">6-Day Forecast</div>
-      </GlassPane>
     </>
   )
+}
+
+/** The sky light behind the pane; its light lags the tilt on a slow pendulum. */
+function Sky({ size, recipe }: { size: WidgetSize; recipe: LiquidRecipe }) {
+  const { onFrame, open } = useGlass()
+  const ref = React.useRef<HTMLDivElement>(null)
+  const slosh = useSpringVar(ref, "--slosh", 0, 18, 2.6)
+  const plaque = useSpringVar(ref, "--plaque", 0, 110, 12)
+  React.useEffect(() => onFrame((f) => slosh(f.px * f.hover)), [onFrame, slosh])
+  React.useEffect(() => {
+    plaque(open ? 1 : 0, { delay: open ? 120 : 0 })
+  }, [open, plaque])
+  return (
+    <div ref={ref} className="wo-world">
+      <div className="wo-sky" aria-hidden="true">
+        <LiquidCanvas recipe={recipe} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 64 : 110} />
+      </div>
+      <Body size={size} />
+    </div>
+  )
+}
+
+// the body reads open from the engine; `now` comes down through context
+const NowCtx = React.createContext<Now | null>(null)
+
+function Body({ size }: { size: WidgetSize }) {
+  const now = React.useContext(NowCtx)
+  const { open } = useGlass()
+  if (!now) return null
+  return size === "small" ? <Small now={now} open={open} /> : size === "medium" ? <Medium now={now} /> : <Large now={now} open={open} />
 }
 
 export function WeatherWidget({ size = "small", className, appearDelay = 0 }: { size?: WidgetSize; className?: string; appearDelay?: number }) {
@@ -552,7 +659,8 @@ export function WeatherWidget({ size = "small", className, appearDelay = 0 }: { 
   const { w, h } = WIDGET[size]
   const clock = clockOf(useNow())
   const night = clock.ready && isNight(clock.minutes)
-  const now: Now = { temp: tempAt(clock.minutes / 60), night, condition: forNight(conditionAt(clock.minutes / 60), night), clock }
+  const condition = forNight(conditionAt(clock.minutes / 60), night)
+  const now: Now = { temp: tempAt(clock.minutes / 60), night, condition, clock }
   // night is smoked glass whatever the desk's tone; by day the glass follows the desk
   const glassTone = night ? "dark" : tone
   const recipe = night ? LIQUIDS.smoke : tone === "dark" ? DEEP_SKY : LIQUIDS.sky
@@ -569,80 +677,82 @@ export function WeatherWidget({ size = "small", className, appearDelay = 0 }: { 
     >
       <style href="weather-object" precedence="glass-widget">{WO_CSS}</style>
       <div className="wo-back" aria-hidden="true" />
-      <LiquidCanvas recipe={recipe} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 72 : 120} />
-      {size === "small" ? <Small now={now} /> : size === "medium" ? <Medium now={now} /> : <Large now={now} />}
+      <NowCtx.Provider value={now}>
+        <Sky size={size} recipe={recipe} />
+      </NowCtx.Provider>
     </GlassObject>
   )
 }
 
 const WO_CSS = `
 .wo-root .go-tilt { border-radius: 24px; }
-.wo-back { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 0 0 .5px rgba(0,0,0,.1); }
+.wo-back { position: absolute; inset: 0; border-radius: 24px; box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 0 0 .5px rgba(0,0,0,.1); }
 .wo-root[data-tone="dark"] .wo-back { box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 0 0 .5px rgba(255,255,255,.1); }
-.wo-root .go-liquid { border-radius: 24px; }
-.wo-wait .wo-sky, .wo-wait .wo-stage, .wo-wait .go-pane-body { visibility: hidden; }
+.wo-wait .wo-front, .wo-wait .go-pane-body, .wo-wait .wo-pocket { visibility: hidden; }
 
-/* the sky: clipped to the object, parallax against the pointer */
-.wo-sky { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; --wo-drift-a: 0; --wo-drift-b: 0; --wo-tw: .5; }
-.wo-sun, .wo-moon {
-  position: absolute; border-radius: 50%;
-  transform:
-    translate(calc(var(--go-px) * -3px), calc(var(--go-py) * -2px + var(--go-hover) * -6px + var(--go-open) * var(--open-rise)))
-    scale(calc(1 - var(--go-open) * var(--open-scale)));
+.wo-world { position: absolute; inset: 0; --slosh: 0; --slosh-v: 0; --plaque: 0; --plaque-v: 0; }
+
+/* the sky light: it lags the tilt, so the cast through the frost moves like liquid */
+.wo-sky { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; }
+.wo-sky .go-liquid {
+  border-radius: 0;
+  transform: translate(calc(var(--slosh) * -9px), calc(var(--go-py) * -3px * var(--go-hover))) scale(1.12);
 }
-.wo-sun {
-  background: radial-gradient(circle at 42% 38%, #fff9d2 0%, #ffe066 38%, #ffbf2e 78%, #ffa31a 100%);
-  box-shadow: 0 0 0 .5px rgba(255,170,30,.25), 0 6px 22px -4px rgba(255,160,20,.55);
+
+/* the pane: frosted, but thin enough that the sky's cast comes through */
+.wo-root .wo-pane .go-pane-tint {
+  background: linear-gradient(180deg, rgba(var(--go-glass), .2) 0%, rgba(var(--go-glass), .38) 55%, rgba(var(--go-glass), .56) 100%);
 }
-.wo-sun::before {
-  content: ""; position: absolute; inset: -70%; border-radius: 50%;
-  background: radial-gradient(circle, rgba(255,214,90,.6) 0%, rgba(255,214,90,.22) 38%, rgba(255,214,90,0) 68%);
-  opacity: calc(.75 + var(--go-hover) * .25);
-  transform: scale(calc(1 + var(--go-hover) * .08));
+.wo-root[data-tone="dark"] .wo-pane .go-pane-tint {
+  background: linear-gradient(180deg, rgba(var(--go-glass), .3) 0%, rgba(var(--go-glass), .46) 55%, rgba(var(--go-glass), .6) 100%);
 }
-.wo-root[data-tone="dark"] .wo-sun::before { background: radial-gradient(circle, rgba(255,200,80,.42) 0%, rgba(255,190,60,.14) 40%, rgba(255,190,60,0) 68%); }
-.wo-moon { background: transparent; filter: drop-shadow(0 0 10px rgba(243,236,210,.35)); }
-.wo-star { position: absolute; border-radius: 50%; background: #fffbe6; transform: translate(calc(var(--go-px) * -1.5px), calc(var(--go-py) * -1px)); }
-.wo-star-0 { opacity: calc(.3 + var(--wo-tw) * .65); }
-.wo-star-1 { opacity: calc(.95 - var(--wo-tw) * .6); }
-.wo-cloud {
-  position: absolute; display: block; overflow: visible;
-  filter: drop-shadow(0 4px 6px rgba(30,50,80,.16));
-  transform:
-    translateX(calc(var(--drift) * 7px + var(--side) * (var(--go-hover) * 13px + var(--go-open) * 30px) + var(--go-px) * 5px))
-    translateY(calc(var(--go-py) * 2px - var(--go-hover) * 2px));
-  opacity: calc(1 - var(--go-open) * .25);
+
+/* the current conditions */
+.wo-front { position: absolute; inset: 0; }
+.wo-city {
+  position: absolute; left: 16px; top: 14px;
+  display: flex; align-items: center; gap: 4px;
+  font-size: 13px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap;
+  transform: translateY(calc(var(--go-hover) * -1px));
 }
-.wo-cloud-back {
-  opacity: calc(.82 - var(--go-open) * .3);
-  transform:
-    translateX(calc(var(--drift) * 5px + var(--side) * (var(--go-hover) * 10px + var(--go-open) * 24px) + var(--go-px) * 2.5px))
-    translateY(calc(var(--go-py) * 1px)) scale(.96);
+.wo-arrow { fill: currentColor; }
+.wo-temp {
+  position: absolute; left: 14px; top: 30px;
+  font-size: 40px; font-weight: 250; line-height: 1; letter-spacing: -.035em;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  transform-origin: 0 0;
+  transform: translateY(calc(var(--go-hover) * -1px)) scale(calc(1 - var(--go-open) * var(--temp-shrink, .45)));
 }
+.wo-deg { font-weight: 250; }
+.wo-summary { position: absolute; left: 16px; bottom: 14px; display: flex; flex-direction: column; gap: 1px; }
+.wo-cond { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.wo-hl { font-size: 11px; color: var(--go-ink-soft); white-space: nowrap; letter-spacing: 0; }
+
+/* the sky glyph: a real sun, moon and clouds */
+.wo-sg { position: absolute; width: 28px; height: 28px; transform-origin: 0 0; }
+.wo-sg-sun, .wo-sg-moon {
+  position: absolute; left: 4px; top: 4px; width: 20px; height: 20px; border-radius: 50%;
+  transform: translateY(calc(var(--go-hover) * -4px));
+}
+.wo-sg-sun {
+  background: radial-gradient(circle at 40% 36%, #fff6c4 0%, #ffd84a 42%, #ffb81c 100%);
+  box-shadow: 0 0 0 .5px rgba(230,150,0,.3), 0 0 10px 1px rgba(255,190,40,calc(.45 + var(--go-hover) * .25));
+}
+.wo-sg-moon { background: transparent; box-shadow: inset 6px -3px 0 0 #f1e7c2; filter: drop-shadow(0 0 4px rgba(241,231,194,.4)); }
+.wo-root:not([data-tone="dark"]) .wo-sg-moon { box-shadow: inset 6px -3px 0 0 #c9b97a; }
+.wo-sg-cloudy .wo-sg-sun, .wo-sg-cloudy .wo-sg-moon { left: 2px; top: 1px; width: 16px; height: 16px; }
+.wo-sg-cloud { position: absolute; display: block; overflow: visible; filter: drop-shadow(0 1.5px 2px rgba(30,50,80,.2)); }
+.wo-sg-front { left: 7px; top: 12px; transform: translateX(calc(var(--go-hover) * 4px)); }
+.wo-sg-back { left: -1px; top: 14px; opacity: .85; transform: translateX(calc(var(--go-hover) * -4px)); }
 .wo-c0 { stop-color: #ffffff; }
 .wo-c1 { stop-color: #dbe3ee; }
-.wo-cloud-edge { stroke: rgba(40,52,70,.12); stroke-width: .35; }
-.wo-root[data-tone="dark"] .wo-c0 { stop-color: #dfe6ef; }
-.wo-root[data-tone="dark"] .wo-c1 { stop-color: #8e9bb0; }
-.wo-root[data-tone="dark"] .wo-cloud { filter: drop-shadow(0 4px 8px rgba(0,0,0,.35)); }
-.wo-night .wo-c0 { stop-color: #6b7488; }
-.wo-night .wo-c1 { stop-color: #3a4152; }
-.wo-night .wo-cloud-edge { stroke: rgba(255,255,255,.1); }
+.wo-cloud-edge { stroke: rgba(40,52,70,.16); stroke-width: .5; }
+.wo-root[data-tone="dark"] .wo-c0 { stop-color: #e4eaf2; }
+.wo-root[data-tone="dark"] .wo-c1 { stop-color: #9aa6b8; }
+.wo-night .wo-c0 { stop-color: #8a93a6; }
+.wo-night .wo-c1 { stop-color: #4f586b; }
 
-/* the middle layer */
-.wo-stage { position: absolute; inset: 0; }
-.wo-temp {
-  position: absolute; left: 14px; top: 8px;
-  font-size: 46px; font-weight: 250; line-height: 1; letter-spacing: -.03em;
-  font-variant-numeric: tabular-nums;
-  transform-origin: 0% 0%;
-  text-shadow: 0 1px 10px rgba(var(--go-glass), .5);
-}
-.wo-deg { font-weight: 300; margin-left: 1px; }
-.wo-city { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; font-weight: 600; letter-spacing: -.005em; white-space: nowrap; }
-.wo-arrow { fill: currentColor; opacity: .85; }
-.wo-cond { font-size: 10.5px; color: var(--go-ink-soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.wo-cond-strong { font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+/* glyphs in rows */
 .wo-glyph { display: block; flex: none; overflow: visible; }
 .wo-g-ray { stroke: #ffb800; stroke-width: 2; stroke-linecap: round; }
 .wo-g-sun { fill: #ffcf24; }
@@ -654,106 +764,76 @@ const WO_CSS = `
 .wo-root[data-tone="dark"] .wo-g-grey { fill: #8d99aa; }
 .wo-g-rain { stroke: #4fb3ff; stroke-width: 1.7; stroke-linecap: round; }
 
-/* glass chips that rise out of the pocket */
+/* hourly */
+.wo-hours { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.wo-hour { display: flex; flex-direction: column; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.wo-hour-t { font-size: 10px; font-weight: 500; color: var(--go-ink-soft); white-space: nowrap; }
+.wo-hour-v { font-size: 11px; font-weight: 600; white-space: nowrap; }
+
+/* the pocket the forecast rises out of */
+.wo-pocket { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; }
+.wo-chip, .wo-sheet-slot { position: absolute; left: 0; top: 0; }
 .wo-chip {
-  position: absolute; left: 50%;
-  box-sizing: border-box;
-  display: flex; flex-direction: column; align-items: center; justify-content: space-between;
-  border-radius: 11px;
-  background: linear-gradient(180deg, rgba(var(--go-glass), .72), rgba(var(--go-glass), .5));
-  -webkit-backdrop-filter: blur(10px) saturate(1.4);
-  backdrop-filter: blur(10px) saturate(1.4);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.75), 0 0 0 .5px rgba(0,0,0,.08), 0 8px 16px -8px var(--go-shadow);
-  opacity: calc(var(--go-open) * 1.5 - .3);
+  box-sizing: border-box; border-radius: 9px;
+  display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 5px 0;
+  background: linear-gradient(180deg, rgba(var(--go-glass), .92), rgba(var(--go-glass), .78));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.85), 0 0 0 .5px rgba(0,0,0,.1), 0 6px 12px -6px var(--go-shadow);
   font-variant-numeric: tabular-nums;
 }
-.wo-root[data-tone="dark"] .wo-chip { box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 0 0 .5px rgba(255,255,255,.1), 0 8px 18px -8px var(--go-shadow); }
-.wo-chip-t { font-size: 9px; color: var(--go-ink-soft); white-space: nowrap; letter-spacing: 0; }
-.wo-chip-v { font-size: 11.5px; font-weight: 600; }
-.wo-chip-lo { font-size: 9.5px; color: var(--go-ink-soft); }
+.wo-root[data-tone="dark"] .wo-chip { background: linear-gradient(180deg, rgba(58,58,64,.94), rgba(40,40,46,.9)); box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 0 0 .5px rgba(255,255,255,.12), 0 6px 14px -6px var(--go-shadow); }
+.wo-chip-t { font-size: 9px; font-weight: 500; letter-spacing: -.06em; color: var(--go-ink-soft); white-space: nowrap; }
+.wo-chip-v { font-size: 10.5px; font-weight: 600; }
 
 /* small */
-.wo-small .wo-temp-small {
-  transform: translateY(calc(var(--go-hover) * -2px)) scale(calc(1 - var(--go-open) * .4));
+.wo-small .wo-now-glyph {
+  left: 14px; top: 84px;
+  transform: translate(calc(var(--go-open) * 113px), calc(var(--go-open) * -71px)) scale(calc(1 - var(--go-open) * .15));
 }
-.wo-open-meta { position: absolute; font-size: 10px; color: var(--go-ink-soft); white-space: nowrap; opacity: calc(var(--go-open) * 1.3 - .3); }
-.wo-open-meta-small { left: 15px; top: 40px; transform: translateY(calc((1 - var(--go-open)) * 8px)); }
-.wo-chip-hour {
-  bottom: 14px; width: 30px; height: 58px; padding: 6px 0 6px;
-  transform:
-    translateX(calc(-50% + var(--i) * 25.5px * var(--go-open)))
-    translateY(calc((1 - var(--go-open)) * 66px + var(--a) * 1.4px * var(--go-open) - var(--go-hover) * 1px))
-    rotate(calc(var(--i) * 3.5deg * var(--go-open)))
-    scale(calc(.82 + var(--go-open) * .18));
-}
-.wo-root .wo-pane-small { top: auto; bottom: 0; height: 50px; }
-.wo-label { position: absolute; inset: 0; padding: 0 14px; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
-.wo-label .wo-cond .go-mono { margin-left: 6px; font-size: 10px; }
+.wo-small .wo-temp { --temp-shrink: .45; }
 
 /* medium */
-.wo-city-top { position: absolute; left: 16px; top: 14px; transform: translateY(calc(var(--go-open) * -2px)); }
-.wo-medium .wo-temp-medium {
-  left: 15px; top: 32px; font-size: 52px;
-  transform: translateY(calc(var(--go-hover) * -2px - var(--go-open) * 3px)) scale(calc(1 - var(--go-open) * .08));
+.wo-medium .wo-now-glyph { left: 14px; top: 84px; }
+.wo-medium .wo-temp { --temp-shrink: .1; }
+.wo-flip { position: absolute; left: 160px; right: 10px; top: 12px; bottom: 12px; perspective: 700px; }
+.wo-spin { position: absolute; inset: 0; transform-style: preserve-3d; transform: rotateX(calc(var(--plaque) * -180deg)); }
+.wo-face {
+  position: absolute; inset: 0; border-radius: 14px;
+  -webkit-backface-visibility: hidden; backface-visibility: hidden;
+  display: grid; align-content: center;
 }
-.wo-side-meta { position: absolute; left: 16px; bottom: 14px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
-.wo-side-meta .wo-glyph { margin-bottom: 2px; }
-.wo-root .wo-pane-medium { inset: 8px 8px 8px auto; width: 184px; }
-.wo-pane-head {
-  display: flex; justify-content: space-between; align-items: baseline;
-  padding: 11px 13px 0; font-size: 10.5px; font-weight: 600; color: var(--go-ink-soft);
+/* a glass plate shows only while it turns, and stays behind the outlook */
+.wo-face-front { background: rgba(var(--go-glass), calc(sin(var(--plaque) * 180deg) * .6)); }
+.wo-face-back {
+  transform: rotateX(180deg);
+  background: linear-gradient(180deg, rgba(var(--go-glass), .72), rgba(var(--go-glass), .56));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.8), 0 0 0 .5px rgba(0,0,0,.08), 0 8px 16px -10px var(--go-shadow);
 }
-.wo-pane-head .go-mono { font-weight: 400; font-size: 10px; }
-.wo-hours { list-style: none; margin: 0; padding: 0 6px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
-.wo-hour { display: flex; flex-direction: column; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
-.wo-hour-t { font-size: 9.5px; color: var(--go-ink-soft); letter-spacing: 0; white-space: nowrap; }
-.wo-hour-v { font-size: 12.5px; font-weight: 600; }
-.wo-pane-medium .wo-hours { position: absolute; left: 0; right: 0; top: 40px; bottom: 16px; align-content: center; }
-.wo-chip-day {
-  top: 24px; left: 270px; width: 32px; height: 120px; padding: 9px 0 9px;
-  transform:
-    translateX(calc(-50% + var(--i) * 35px * var(--go-open)))
-    translateY(calc((1 - var(--go-open)) * 72px + var(--a) * 1.2px * var(--go-open) - var(--go-hover) * 1px))
-    rotate(calc(var(--i) * 2deg * var(--go-open)))
-    scale(calc(.85 + var(--go-open) * .15));
-}
-.wo-chip-day .wo-chip-t { font-size: 10px; font-weight: 600; color: var(--go-ink); }
-.wo-chip-day .wo-chip-v { margin-top: auto; }
-.wo-chip-day .wo-glyph { margin-top: 10px; }
+.wo-root[data-tone="dark"] .wo-face-back { box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 0 0 .5px rgba(255,255,255,.1), 0 8px 16px -10px var(--go-shadow); }
+.wo-face .wo-hours { padding: 0 4px; }
+.wo-days { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.wo-day-t { color: var(--go-ink); font-weight: 600; }
+.wo-days .wo-hour { gap: 5px; }
+.wo-days .wo-hour-v { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.wo-day-lo { font-size: 10px; font-weight: 500; color: var(--go-ink-soft); }
 
 /* large */
-.wo-city-large { left: 20px; top: 20px; }
-.wo-large .wo-temp-large {
-  left: 18px; top: 38px; font-size: 66px;
-  transform: translateY(calc(var(--go-hover) * -2px - var(--go-open) * 6px)) scale(calc(1 - var(--go-open) * .2));
-}
-.wo-side-meta-large { left: 20px; top: 108px; bottom: auto; flex-direction: row; align-items: center; gap: 6px; transform: translateY(calc(var(--go-open) * -18px)); }
-.wo-side-meta-large .wo-glyph { margin: 0; }
-.wo-root .wo-pane-large { inset: 166px 8px 8px 8px; }
-.wo-pane-large .wo-pane-head { padding: 13px 16px 0; }
-.wo-pane-large .wo-hours { position: absolute; left: 4px; right: 4px; top: 40px; height: 82px; align-content: center; }
-.wo-pane-large .wo-hour { gap: 9px; }
-.wo-pane-large .wo-hour-t { font-size: 10px; }
-.wo-pane-large .wo-hour-v { font-size: 13px; }
-.wo-pane-foot {
-  position: absolute; left: 16px; right: 16px; bottom: 13px; padding-top: 10px;
+.wo-large .wo-now-glyph { left: auto; right: 16px; top: 14px; transform: translateY(calc(var(--go-open) * -2px)); }
+.wo-large .wo-temp { --temp-shrink: .2; }
+.wo-large .wo-summary { left: auto; right: 16px; top: 48px; bottom: auto; align-items: flex-end; }
+.wo-hourly-large {
+  position: absolute; left: 10px; right: 10px; top: 92px; height: 64px;
+  display: grid; align-content: center;
   border-top: .5px solid var(--go-ink-faint);
-  font-size: 10.5px; font-weight: 600; color: var(--go-ink-soft);
+  transform: translateY(calc(var(--go-open) * -8px));
 }
-.wo-root .wo-row {
-  left: 12px; right: 12px; top: 138px; height: 31px;
-  display: flex; align-items: center; gap: 8px; padding: 0 12px;
-  font-variant-numeric: tabular-nums; border-radius: 10px;
-  transform:
-    translateY(calc(var(--i) * 35px + (1 - var(--go-open)) * (var(--r) * 35px + 6px)))
-    scale(calc(.9 + var(--go-open) * .1));
-  opacity: calc(.55 + var(--go-open) * .45);
-}
-.wo-row-day { width: 40px; font-size: 11.5px; font-weight: 600; }
-.wo-row-lo, .wo-row-hi { width: 24px; font-size: 11px; text-align: right; }
-.wo-row-lo { color: var(--go-ink-soft); }
-.wo-row-hi { text-align: left; font-weight: 600; }
+.wo-list { list-style: none; margin: 0; padding: 0; position: absolute; left: 16px; right: 16px; top: 172px; border-top: .5px solid var(--go-ink-faint); }
+.wo-row { height: 28px; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.wo-row-day { width: 44px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.wo-row-lo, .wo-row-hi { width: 26px; font-size: 12px; font-weight: 500; }
+.wo-row-lo { text-align: right; color: var(--go-ink-soft); }
+.wo-row-hi { font-weight: 600; }
 .wo-bar { position: relative; flex: 1; height: 4px; border-radius: 4px; background: var(--go-ink-faint); }
 .wo-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
-.wo-bar-dot { position: absolute; top: 50%; width: 7px; height: 7px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1.5px rgba(0,0,0,.35); transform: translate(-50%, -50%); }
+.wo-bar-dot { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1.5px rgba(0,0,0,.35); transform: translate(-50%, -50%); }
+.wo-root .wo-sheet { position: absolute; inset: 0; border-radius: 9px; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-variant-numeric: tabular-nums; }
 `
