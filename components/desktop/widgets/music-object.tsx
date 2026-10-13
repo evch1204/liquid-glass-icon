@@ -1,28 +1,30 @@
 "use client"
 
 import * as React from "react"
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react"
-import { GlassObject, GlassPane, GlassSheet, LiquidCanvas, useGlass, useSpringVar, type LiquidRecipe } from "@/components/ui/glass-object"
+import { Music, Pause, Play, SkipBack, SkipForward } from "lucide-react"
+import { GlassObject, GlassPane, GlassSheet, LiquidCanvas, useGlass, useSpringVar, type LiquidHandle, type LiquidRecipe } from "@/components/ui/glass-object"
 import { ART_PRESETS, createArtJob, type ArtJob, type ArtPreset, type ArtRecipe } from "@/components/ui/glass-folder-cards"
 import { WIDGET, type WidgetSize } from "../glass"
 import { useWindowManager } from "../window-manager"
 
 /**
- * Music — a record you can pick up, drawn as an object.
+ * Music — the Now Playing widget, drawn as an object.
  *
- * Three layers: a liquid light at the back tinted from the current album's
- * palette, the record in the middle (generated album art as a square tile
- * that tilts with the object, and a real five-bar equaliser whose bars are
- * moved on rAF), and a frosted pane carrying the title, the artist, the
- * transport and a thin progress line along its top edge.
+ * At rest it reads like the macOS widget: the album art, the title and
+ * artist, the transport. Underneath it is a thing with layers: a liquid
+ * light tinted from the album, the art tile, one glass pane carrying the
+ * type and the buttons, and — hidden behind the art — the record itself.
  *
- * - **Rest**: the art sits in the light; the bars idle low; the next tracks
- *   wait in the pocket behind the pane, their edges just showing.
- * - **Hover**: the art lifts and tilts a touch more than the object; the bars
- *   wake; the pane leans back.
- * - **Open** (click): the pane folds away; the art slides up and shrinks, the
- *   queue rises out of the pocket as white sheets, and a scrubbable progress
- *   bar appears under the art.
+ * - **Rest**: small is the art edge to edge under a thin frost with white
+ *   type; medium and large are art on a milk-glass pane with the controls.
+ * - **Hover**: the pane leans back and the object lifts; the art lifts 4px and
+ *   tilts a touch more than the object; the equaliser bars wake.
+ * - **Open** (click): the pane hinges down and away; the art slides up and
+ *   shrinks, and the record slides out from behind it — a translucent
+ *   coloured disc whose label is the art. Its angular velocity is a spring
+ *   integrated into `--spin` every frame, so it spins up while playing and
+ *   coasts down when paused. The next tracks rise as sheets fanning into a
+ *   stack, and a scrubber appears under the art.
  * - **Activate** (double-click, Enter): the Music app.
  */
 
@@ -277,14 +279,6 @@ function liquidFor(track: Track, tone: "light" | "dark"): LiquidRecipe {
   const at = (f: number) => s[Math.round(f * (s.length - 1))]
   return { colors: [at(0), at(0.4), tone === "dark" ? at(1) : mix(at(1), "#ffffff", 0.5), at(0.7)], gloss: tone === "dark" ? 0.3 : 0.5, speed: 0.9 }
 }
-
-function Liquid({ cells, seed }: { cells?: number; seed: number }) {
-  const { tone } = useGlass()
-  const index = useIndex()
-  const recipe = React.useMemo(() => liquidFor(TRACKS[index], tone), [index, tone])
-  return <LiquidCanvas recipe={recipe} seed={seed} cells={cells} />
-}
-
 // ---------------------------------------------------------------------------
 // The equaliser: five real bars, moved by springs on rAF while playing.
 
@@ -353,46 +347,6 @@ function Equalizer({ className }: { className?: string }) {
     </span>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Progress, times, scrubber: all written by ref.
-
-function ProgressLine({ className }: { className?: string }) {
-  const fill = React.useRef<HTMLSpanElement>(null)
-  const write = React.useCallback((p: Player) => {
-    if (fill.current) fill.current.style.transform = `scaleX(${(p.position / TRACKS[p.index].duration).toFixed(4)})`
-  }, [])
-  usePlayerDOM(write)
-  return (
-    <span aria-hidden="true" className={"mu-line" + (className ? " " + className : "")}>
-      <span ref={fill} className="mu-line-fill" style={{ transform: `scaleX(${(INITIAL.position / TRACKS[INITIAL.index].duration).toFixed(4)})` }} />
-    </span>
-  )
-}
-
-type TimeKind = "elapsed" | "remaining" | "both"
-const timeText = (p: Player, kind: TimeKind) => {
-  const d = TRACKS[p.index].duration
-  return kind === "elapsed" ? fmt(p.position) : kind === "remaining" ? "-" + fmt(d - p.position) : fmt(p.position) + " / " + fmt(d)
-}
-
-function Time({ kind, className }: { kind: TimeKind; className?: string }) {
-  const ref = React.useRef<HTMLSpanElement>(null)
-  const write = React.useCallback(
-    (p: Player) => {
-      const s = timeText(p, kind)
-      if (ref.current && ref.current.textContent !== s) ref.current.textContent = s
-    },
-    [kind],
-  )
-  usePlayerDOM(write)
-  return (
-    <span ref={ref} className={"go-mono" + (className ? " " + className : "")}>
-      {timeText(INITIAL, kind)}
-    </span>
-  )
-}
-
 function Scrubber({ className }: { className?: string }) {
   const { open } = useGlass()
   const index = useIndex()
@@ -464,9 +418,219 @@ function Scrubber({ className }: { className?: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Transport
+// Albums and the record's colour
 
-function MuButton({ label, className, onPress, children }: { label: string; className?: string; onPress: () => void; children: React.ReactNode }) {
+const ALBUM: Record<string, string> = {
+  t1: "Undertow",
+  t2: "Kindling",
+  t3: "Night Signals",
+  t4: "Small Hours",
+  t5: "Field Notes",
+  t6: "Undertow",
+}
+
+/** The vinyl's colour: the album's most saturated mid-tone, at 78% so the liquid shows through. */
+function vinylOf(track: Track): string {
+  const cs = recipeOf(track.art).colors
+  const sat = (c: string) => {
+    const n = parseInt(c.slice(1), 16)
+    const r = (n >> 16) & 255
+    const g = (n >> 8) & 255
+    const b = n & 255
+    return Math.max(r, g, b) - Math.min(r, g, b)
+  }
+  const mids = cs.filter((c) => lum(c) > 45 && lum(c) < 215)
+  const pick = (mids.length ? mids : cs).slice().sort((a, b) => sat(b) - sat(a))[0]
+  return pick + "c7"
+}
+
+// ---------------------------------------------------------------------------
+// Geometry: where the art sits at rest and open, and where the record slides out.
+
+type Box = { x: number; y: number; s: number }
+type Geo = { art: Box; artR: number; open: Box; record: Box }
+
+const GEO: Record<WidgetSize, Geo> = {
+  small: { art: { x: 0, y: 0, s: 170 }, artR: 24, open: { x: 12, y: 12, s: 56 }, record: { x: 42, y: 13, s: 54 } },
+  medium: { art: { x: 21, y: 21, s: 128 }, artR: 12, open: { x: 16, y: 16, s: 64 }, record: { x: 48, y: 17, s: 62 } },
+  large: { art: { x: 20, y: 20, s: 148 }, artR: 14, open: { x: 20, y: 20, s: 64 }, record: { x: 52, y: 21, s: 62 } },
+}
+
+/** CSS variables that move the art from its rest box to its open box (scale about its centre). */
+function artVars(g: Geo): React.CSSProperties {
+  const { art: a, open: o } = g
+  return {
+    "--ax": a.x + "px",
+    "--ay": a.y + "px",
+    "--as": a.s + "px",
+    "--ar": g.artR + "px",
+    "--adx": o.x + o.s / 2 - (a.x + a.s / 2) + "px",
+    "--ady": o.y + o.s / 2 - (a.y + a.s / 2) + "px",
+    "--ads": (1 - o.s / a.s).toFixed(4),
+  } as React.CSSProperties
+}
+
+// ---------------------------------------------------------------------------
+// The deck: the record's spin (ω is a spring, integrated into --spin) and the liquid's energy.
+
+const DeckCtx = React.createContext<React.RefObject<LiquidHandle | null> | null>(null)
+
+function Deck({ size, children }: { size: WidgetSize; children: React.ReactNode }) {
+  const ref = React.useRef<HTMLDivElement>(null)
+  const liquid = React.useRef<LiquidHandle | null>(null)
+  const playing = usePlaying()
+  const spinTo = React.useRef<(on: boolean) => void>(() => {})
+
+  React.useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    const s = { w: 0, v: 0, t: 0, k: 5, c: 4.2, a: 0 }
+    let raf = 0
+    let last = 0
+    const loop = (now: number) => {
+      const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016
+      last = now
+      const acc = -s.k * (s.w - s.t) - s.c * s.v
+      s.v += acc * dt
+      s.w += s.v * dt
+      s.a = (s.a + s.w * dt) % 360
+      el.style.setProperty("--spin", s.a.toFixed(2))
+      if (s.t === 0 && Math.abs(s.w) < 0.4 && Math.abs(s.v) < 0.4) {
+        s.w = 0
+        s.v = 0
+        raf = 0
+        last = 0
+        return
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    spinTo.current = (on) => {
+      // 33⅓ rpm is 200°/s: up in ~1.2s, coasting down in ~2.5s
+      s.t = on ? 200 : 0
+      s.k = on ? 5 : 1.6
+      s.c = on ? 4.2 : 2.4
+      if (!reduce && !raf) raf = requestAnimationFrame(loop)
+    }
+    return () => {
+      cancelAnimationFrame(raf)
+      spinTo.current = () => {}
+    }
+  }, [])
+
+  React.useEffect(() => {
+    spinTo.current(playing)
+    if (!playing) {
+      liquid.current?.energy(1)
+      return
+    }
+    liquid.current?.energy(1.8)
+    // the engine eases energy back on its own; keep it up while playing
+    const t = window.setInterval(() => liquid.current?.energy(1.8), 300)
+    return () => window.clearInterval(t)
+  }, [playing])
+
+  return (
+    <DeckCtx.Provider value={liquid}>
+      <div ref={ref} className="mu-deck" style={{ "--spin": 0, ...artVars(GEO[size]) } as React.CSSProperties}>
+        {children}
+      </div>
+    </DeckCtx.Provider>
+  )
+}
+
+function Liquid({ cells, seed }: { cells?: number; seed: number }) {
+  const { tone } = useGlass()
+  const liquid = React.useContext(DeckCtx)
+  const index = useIndex()
+  const recipe = React.useMemo(() => liquidFor(TRACKS[index], tone), [index, tone])
+  return <LiquidCanvas ref={liquid ?? undefined} recipe={recipe} seed={seed} cells={cells} />
+}
+
+// ---------------------------------------------------------------------------
+// The art tile, and the record that hides behind it
+
+function MainArt({ chip }: { chip: boolean }) {
+  const index = useIndex()
+  return (
+    <div className="mu-art">
+      <Art key={index} track={TRACKS[index]} className="mu-art-img">
+        <span className="mu-art-sheen" />
+        {chip ? (
+          <span className="mu-chip">
+            <Equalizer className="mu-eq-chip" />
+          </span>
+        ) : null}
+      </Art>
+    </div>
+  )
+}
+
+function Record({ size }: { size: WidgetSize }) {
+  const index = useIndex()
+  const t = TRACKS[index]
+  const r = GEO[size].record
+  return (
+    <div className="mu-record" aria-hidden="true" style={{ left: r.x + "px", top: r.y + "px", width: r.s + "px", height: r.s + "px" }}>
+      <div className="mu-spin">
+        <div className="mu-vinyl" style={{ "--vinyl": vinylOf(t) } as React.CSSProperties} />
+        <Art key={index} track={t} className="mu-label" />
+      </div>
+      <div className="mu-sheen" />
+      <span className="mu-spindle" />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Progress and times, written by ref
+
+function ProgressLine({ className }: { className?: string }) {
+  const fill = React.useRef<HTMLSpanElement>(null)
+  const write = React.useCallback((p: Player) => {
+    if (fill.current) fill.current.style.transform = `scaleX(${(p.position / TRACKS[p.index].duration).toFixed(4)})`
+  }, [])
+  usePlayerDOM(write)
+  return (
+    <span aria-hidden="true" className={"mu-line" + (className ? " " + className : "")}>
+      <span ref={fill} className="mu-line-fill" style={{ transform: `scaleX(${(INITIAL.position / TRACKS[INITIAL.index].duration).toFixed(4)})` }} />
+    </span>
+  )
+}
+
+type TimeKind = "elapsed" | "remaining"
+const timeText = (p: Player, kind: TimeKind) => (kind === "elapsed" ? fmt(p.position) : "-" + fmt(TRACKS[p.index].duration - p.position))
+
+function Time({ kind, className }: { kind: TimeKind; className?: string }) {
+  const ref = React.useRef<HTMLSpanElement>(null)
+  const write = React.useCallback(
+    (p: Player) => {
+      const s = timeText(p, kind)
+      if (ref.current && ref.current.textContent !== s) ref.current.textContent = s
+    },
+    [kind],
+  )
+  usePlayerDOM(write)
+  return (
+    <span ref={ref} className={"go-mono" + (className ? " " + className : "")}>
+      {timeText(INITIAL, kind)}
+    </span>
+  )
+}
+
+function Times({ className }: { className?: string }) {
+  return (
+    <span className={"mu-times" + (className ? " " + className : "")}>
+      <Time kind="elapsed" />
+      <Time kind="remaining" />
+    </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Transport: round glass buttons with a press spring
+
+function MuButton({ label, className, hidden, onPress, children }: { label: string; className?: string; hidden?: boolean; onPress: () => void; children: React.ReactNode }) {
   const ref = React.useRef<HTMLButtonElement>(null)
   const press = useSpringVar(ref, "--mu-b", 0, 520, 24)
   return (
@@ -474,6 +638,8 @@ function MuButton({ label, className, onPress, children }: { label: string; clas
       ref={ref}
       type="button"
       aria-label={label}
+      tabIndex={hidden ? -1 : 0}
+      aria-hidden={hidden || undefined}
       className={"mu-btn go-live" + (className ? " " + className : "")}
       onPointerDown={(e) => {
         e.stopPropagation()
@@ -495,26 +661,65 @@ function MuButton({ label, className, onPress, children }: { label: string; clas
   )
 }
 
-function Transport({ size, className }: { size: "sm" | "md" | "lg"; className?: string }) {
+/** `rest` buttons live on the pane and go dead when it folds away; `open` ones live on the open face. */
+function Transport({ size, prev = true, face = "rest", className }: { size: "sm" | "md" | "lg"; prev?: boolean; face?: "rest" | "open"; className?: string }) {
   const playing = usePlaying()
-  const icon = size === "lg" ? 17 : size === "md" ? 15 : 13
+  const { open } = useGlass()
+  const hidden = face === "rest" ? open : !open
+  const icon = size === "lg" ? 15 : size === "md" ? 13 : 11
   return (
     <div className={"mu-transport mu-transport-" + size + (className ? " " + className : "")}>
-      <MuButton label="Previous track" onPress={store.prev}>
-        <SkipBack size={icon} fill="currentColor" strokeWidth={1.6} />
+      {prev ? (
+        <MuButton label="Previous track" hidden={hidden} onPress={store.prev}>
+          <SkipBack size={icon} fill="currentColor" strokeWidth={1.4} />
+        </MuButton>
+      ) : null}
+      <MuButton label={playing ? "Pause" : "Play"} hidden={hidden} className="mu-play" onPress={store.toggle}>
+        {playing ? <Pause size={icon + 1} fill="currentColor" strokeWidth={0} /> : <Play size={icon + 1} fill="currentColor" strokeWidth={0} className="mu-play-icon" />}
       </MuButton>
-      <MuButton label={playing ? "Pause" : "Play"} className="mu-play" onPress={store.toggle}>
-        {playing ? <Pause size={icon} fill="currentColor" strokeWidth={0} /> : <Play size={icon} fill="currentColor" strokeWidth={0} className="mu-play-icon" />}
-      </MuButton>
-      <MuButton label="Next track" onPress={store.next}>
-        <SkipForward size={icon} fill="currentColor" strokeWidth={1.6} />
+      <MuButton label="Next track" hidden={hidden} onPress={store.next}>
+        <SkipForward size={icon} fill="currentColor" strokeWidth={1.4} />
       </MuButton>
     </div>
   )
 }
 
 // ---------------------------------------------------------------------------
-// The pocket: the queue as white sheets that rise when open.
+// Text
+
+function NowText({ className, album = false }: { className?: string; album?: boolean }) {
+  const t = TRACKS[useIndex()]
+  return (
+    <span className={"mu-now" + (className ? " " + className : "")}>
+      <span className="mu-title">{t.title}</span>
+      <span className="mu-artist">{t.artist}</span>
+      {album ? <span className="mu-album">{ALBUM[t.id]}</span> : null}
+    </span>
+  )
+}
+
+/** Up Next printed on the pane (large, at rest). */
+function UpNextList({ count }: { count: number }) {
+  const index = useIndex()
+  return (
+    <div className="mu-upnext-list" aria-hidden="true">
+      <span className="mu-kicker">Up Next</span>
+      {upNext(index, count).map((t, i) => (
+        <span key={i} className="mu-upnext-row">
+          <Art track={t} className="mu-upnext-art" />
+          <span className="mu-upnext-text">
+            <span className="mu-upnext-title">{t.title}</span>
+            <span className="mu-upnext-artist">{t.artist}</span>
+          </span>
+          <span className="mu-upnext-dur go-mono">{fmt(t.duration)}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The queue: the next tracks as sheets that rise and fan into a stack when open
 
 function Queue({ count }: { count: number }) {
   const { open } = useGlass()
@@ -553,123 +758,90 @@ function Queue({ count }: { count: number }) {
   )
 }
 
-function NowText({ className }: { className?: string }) {
-  const t = TRACKS[useIndex()]
-  return (
-    <span className={"mu-now" + (className ? " " + className : "")}>
-      <span className="mu-title">{t.title}</span>
-      <span className="mu-artist">{t.artist}</span>
-    </span>
-  )
-}
-
-function MainArt({ chip }: { chip: boolean }) {
-  const index = useIndex()
-  return (
-    <div className="mu-art">
-      <Art key={index} track={TRACKS[index]} className="mu-art-img">
-        <span className="mu-art-sheen" />
-        {chip ? (
-          <span className="mu-chip">
-            <Equalizer className="mu-eq-chip" />
-          </span>
-        ) : null}
-      </Art>
-    </div>
-  )
-}
-
 // ---------------------------------------------------------------------------
 // Sizes
 
-/** The small object: art and bars in the light, the pane with the transport, three sheets in the pocket. */
+const PANE = { hinge: "bottom", lean: -9, openLean: -70, openShift: 14, openFade: 0.8, radius: 22 } as const
+
+/** Small: the art edge to edge under a thin frost, white type, two round buttons. */
 function Small() {
   return (
-    <>
+    <Deck size="small">
       <Liquid seed={3} />
-      <div className="mu-side" aria-hidden="true">
-        <span className="mu-side-times">
-          <Time kind="elapsed" className="mu-side-el" />
-          <Time kind="remaining" className="mu-side-rem go-soft" />
-        </span>
-        <Equalizer className="mu-eq-side" />
-      </div>
-      <Queue count={3} />
+      <Record size="small" />
       <MainArt chip={false} />
+      <GlassPane {...PANE} frost={0.15} className="mu-pane mu-pane-s">
+        <Music size={13} strokeWidth={2.2} className="mu-glyph" aria-hidden="true" />
+        <Equalizer className="mu-eq-corner" />
+        <NowText className="mu-now-s" />
+        <Transport size="sm" prev={false} className="mu-transport-rest" />
+      </GlassPane>
+      <Queue count={3} />
       <div className="mu-face">
-        <NowText className="mu-now-face" />
-        <Time kind="both" className="mu-face-time go-soft" />
+        <Transport size="sm" prev={false} face="open" />
+        <Time kind="elapsed" className="mu-face-el" />
       </div>
       <Scrubber className="mu-scrub-s" />
-      <GlassPane hinge="bottom" lean={-10} openLean={-80} openShift={16} openFade={0.9} radius={18} className="mu-pane mu-pane-s">
-        <ProgressLine />
-        <div className="mu-pane-row">
-          <NowText />
-          <Transport size="sm" />
-        </div>
-      </GlassPane>
-    </>
+    </Deck>
   )
 }
 
-/** The wide object: art on the left, the pane on the right; open swings the pane away to show the queue. */
+/** Medium: art on the left; title, artist, album, progress and transport on the right. */
 function Medium() {
   return (
-    <>
+    <Deck size="medium">
       <Liquid seed={6} cells={120} />
-      <Queue count={3} />
-      <MainArt chip />
-      <div className="mu-face">
-        <Scrubber />
-        <span className="mu-face-times">
-          <Time kind="elapsed" />
-          <Time kind="remaining" />
-        </span>
-        <NowText className="mu-now-face" />
-      </div>
-      <GlassPane hinge="right" lean={-7} openLean={-82} openFade={0.92} radius={18} className="mu-pane mu-pane-m">
-        <div className="mu-pane-col">
-          <span className="mu-kicker go-mono">Now Playing</span>
-          <NowText />
-          <ProgressLine className="mu-line-m" />
-          <span className="mu-pane-times">
-            <Time kind="elapsed" />
-            <Time kind="remaining" />
-          </span>
-          <Transport size="md" />
+      <GlassPane {...PANE} frost={0.9} className="mu-pane mu-pane-m">
+        <div className="mu-col">
+          <NowText album className="mu-now-m" />
+          <div className="mu-progress">
+            <ProgressLine />
+            <Times />
+          </div>
+          <Transport size="md" className="mu-transport-rest" />
         </div>
       </GlassPane>
-    </>
+      <Record size="medium" />
+      <MainArt chip />
+      <Queue count={3} />
+      <div className="mu-face">
+        <NowText className="mu-now-face" />
+        <Scrubber />
+        <Times />
+      </div>
+    </Deck>
   )
 }
 
-/** The big object: big art centred in the light; open fans the whole queue. */
+/** Large: big art, then the controls strip, then Up Next. */
 function Large() {
   return (
-    <>
+    <Deck size="large">
       <Liquid seed={9} cells={120} />
-      <Queue count={TRACKS.length - 1} />
+      <GlassPane {...PANE} frost={0.9} className="mu-pane mu-pane-l">
+        <Music size={14} strokeWidth={2.2} className="mu-glyph mu-glyph-ink" aria-hidden="true" />
+        <NowText album className="mu-now-l" />
+        <div className="mu-strip">
+          <div className="mu-progress">
+            <ProgressLine />
+            <Times />
+          </div>
+          <Transport size="lg" className="mu-transport-rest" />
+        </div>
+        <UpNextList count={3} />
+      </GlassPane>
+      <Record size="large" />
       <MainArt chip />
+      <Queue count={TRACKS.length - 1} />
       <div className="mu-face">
         <NowText className="mu-now-face" />
         <Scrubber />
-        <span className="mu-face-times">
-          <Time kind="elapsed" />
-          <Time kind="remaining" />
-        </span>
+        <Times />
       </div>
-      <span className="mu-upnext go-mono" aria-hidden="true">
-        Up Next
-      </span>
-      <GlassPane hinge="bottom" lean={-8} openLean={-78} openShift={18} openFade={0.9} radius={18} className="mu-pane mu-pane-l">
-        <ProgressLine />
-        <div className="mu-pane-top">
-          <NowText />
-          <Time kind="both" className="mu-pane-both go-soft" />
-        </div>
-        <Transport size="lg" />
-      </GlassPane>
-    </>
+      <div className="mu-face mu-face-bottom">
+        <Transport size="lg" face="open" />
+      </div>
+    </Deck>
   )
 }
 
@@ -697,10 +869,11 @@ export function MusicWidget({ size = "small", className, appearDelay = 0 }: { si
 const MU_CSS = `
 .mu-root .go-tilt { border-radius: 24px; }
 .mu-back { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 0 0 .5px rgba(0,0,0,.1); }
-.mu-root .go-liquid { border-radius: 24px; }
 .mu-root[data-tone="dark"] .mu-back { box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 0 0 .5px rgba(255,255,255,.1); }
+.mu-deck { position: absolute; inset: 0; border-radius: 24px; }
+.mu-root .go-liquid { border-radius: 24px; }
 
-/* art */
+/* ---- art ---- */
 .mu-art-tile { position: relative; overflow: hidden; }
 .mu-art-tile > canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: 0; }
 .mu-art {
@@ -709,79 +882,117 @@ const MU_CSS = `
   transform:
     translate(calc(var(--go-open) * var(--adx)), calc(var(--go-open) * var(--ady) - var(--go-hover) * (1 - var(--go-open)) * 4px))
     perspective(520px)
-    rotateX(calc(var(--go-py) * var(--go-hover) * -8deg))
-    rotateY(calc(var(--go-px) * var(--go-hover) * 10deg))
-    scale(calc(1 + var(--go-hover) * (1 - var(--go-open)) * .035 - var(--go-open) * var(--ads) - var(--go-press) * .015));
+    rotateX(calc(var(--go-py) * var(--go-hover) * var(--atilt, -8deg)))
+    rotateY(calc(var(--go-px) * var(--go-hover) * var(--atilt-y, 10deg)))
+    scale(calc(1 + var(--go-hover) * (1 - var(--go-open)) * .03 - var(--go-open) * var(--ads) - var(--go-press) * .015));
 }
 .mu-art-img {
   position: absolute; inset: 0; border-radius: var(--ar);
-  box-shadow:
-    0 0 0 .5px rgba(0,0,0,.14),
-    0 calc(7px + var(--go-hover) * 7px) calc(16px + var(--go-hover) * 12px) -7px rgba(16,18,24,.5);
+  box-shadow: 0 0 0 .5px rgba(0,0,0,.14), 0 calc(7px + var(--go-hover) * 7px) calc(16px + var(--go-hover) * 12px) -7px rgba(16,18,24,.5);
 }
 .mu-root[data-tone="dark"] .mu-art-img { box-shadow: 0 0 0 .5px rgba(255,255,255,.14), 0 calc(8px + var(--go-hover) * 7px) calc(18px + var(--go-hover) * 12px) -6px rgba(0,0,0,.75); }
 .mu-art-sheen {
   position: absolute; inset: 0; border-radius: inherit;
-  background:
-    radial-gradient(110% 80% at calc(25% + var(--go-px) * 35%) calc(-5% + var(--go-py) * 30%), rgba(255,255,255,calc(.2 + var(--go-hover) * .16)), rgba(255,255,255,0) 58%),
-    linear-gradient(180deg, rgba(255,255,255,0) 60%, rgba(0,0,0,.12));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), inset 0 0 0 .5px rgba(255,255,255,.18);
+  background: radial-gradient(110% 80% at calc(25% + var(--go-px) * 35%) calc(-5% + var(--go-py) * 30%), rgba(255,255,255,calc(.16 + var(--go-hover) * .16)), rgba(255,255,255,0) 58%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.3), inset 0 0 0 .5px rgba(255,255,255,.16);
 }
 
-/* equaliser */
+/* ---- the record behind the art ---- */
+.mu-record {
+  position: absolute; border-radius: 50%;
+  opacity: min(1, calc(var(--go-open) * 1.6));
+  transform: translateX(calc((1 - var(--go-open)) * -28px)) rotate(calc((1 - var(--go-open)) * -40deg));
+  box-shadow: 0 2px 6px -1px rgba(0,0,0,.35);
+}
+.mu-spin { position: absolute; inset: 0; border-radius: 50%; transform: rotate(calc(var(--spin) * 1deg)); }
+.mu-vinyl {
+  position: absolute; inset: 0; border-radius: 50%;
+  background:
+    conic-gradient(from 10deg, rgba(255,255,255,.14), rgba(255,255,255,0) 22%, rgba(0,0,0,.08) 40%, rgba(255,255,255,.1) 58%, rgba(255,255,255,0) 76%, rgba(0,0,0,.06) 90%, rgba(255,255,255,.14)),
+    repeating-radial-gradient(circle, transparent 0 1px, rgba(0,0,0,.08) 1px 1.6px),
+    var(--vinyl);
+  box-shadow: inset 0 0 0 .5px rgba(0,0,0,.3), inset 0 0 0 1.5px rgba(255,255,255,.16);
+}
+.mu-label {
+  position: absolute; left: 50%; top: 50%; width: 37%; height: 37%; translate: -50% -50%; border-radius: 50%;
+  box-shadow: 0 0 0 .5px rgba(0,0,0,.25);
+}
+.mu-sheen {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from calc(var(--go-px) * 40deg + 30deg),
+    rgba(255,255,255,0) 0deg, rgba(255,255,255,.6) 14deg, rgba(255,255,255,0) 34deg,
+    rgba(255,255,255,0) 180deg, rgba(255,255,255,.45) 194deg, rgba(255,255,255,0) 214deg, rgba(255,255,255,0) 360deg);
+  -webkit-mask: radial-gradient(circle closest-side, transparent 38%, #000 42%, #000 97%, transparent 100%);
+  mask: radial-gradient(circle closest-side, transparent 38%, #000 42%, #000 97%, transparent 100%);
+  mix-blend-mode: soft-light;
+}
+.mu-root[data-tone="dark"] .mu-sheen { mix-blend-mode: screen; opacity: .35; }
+.mu-spindle {
+  position: absolute; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff, #b6b8be 55%, #6d6f76);
+  box-shadow: 0 0 0 .75px rgba(0,0,0,.3);
+}
+
+/* ---- equaliser ---- */
 .mu-eq { display: flex; align-items: flex-end; }
 .mu-bar { position: relative; display: block; height: 100%; overflow: hidden; }
 .mu-bar-in { position: absolute; inset: 0; display: block; border-radius: inherit; background: currentColor; }
-.mu-eq-side { height: 34px; gap: 3px; color: var(--go-ink); opacity: .78; }
-.mu-eq-side .mu-bar { width: 4px; border-radius: 2px; }
 .mu-chip {
-  position: absolute; left: 8px; bottom: 8px; display: flex; padding: 5px 6px; border-radius: 8px;
-  background: rgba(10,10,14,.34); -webkit-backdrop-filter: blur(8px) saturate(1.4); backdrop-filter: blur(8px) saturate(1.4);
+  position: absolute; right: 7px; top: 7px; display: flex; padding: 4px 5px; border-radius: 7px;
+  background: rgba(10,10,14,.3); -webkit-backdrop-filter: blur(8px) saturate(1.4); backdrop-filter: blur(8px) saturate(1.4);
   box-shadow: inset 0 0 0 .5px rgba(255,255,255,.22);
-  opacity: calc(.82 + var(--go-hover) * .18);
+  opacity: calc(.75 + var(--go-hover) * .25);
 }
-.mu-eq-chip { height: 13px; gap: 2px; color: #fff; }
-.mu-eq-chip .mu-bar { width: 3px; border-radius: 1.5px; }
+.mu-eq-chip { height: 11px; gap: 2px; color: #fff; }
+.mu-eq-chip .mu-bar { width: 2.5px; border-radius: 1.25px; }
 
-/* text */
-.mu-now { display: flex; flex-direction: column; min-width: 0; }
-.mu-title, .mu-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mu-title { font-size: 12px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; }
-.mu-artist { font-size: 10.5px; color: var(--go-ink-soft); line-height: 1.25; }
-
-/* pane */
+/* ---- the pane ---- */
 .mu-pane .go-pane-body { overflow: hidden; }
 .mu-root[data-open] .mu-pane .go-live { pointer-events: none; }
-.mu-line { position: absolute; left: 16px; right: 16px; top: 0; height: 2px; border-radius: 0 0 2px 2px; overflow: hidden; background: var(--go-ink-faint); }
-.mu-line-fill { position: absolute; inset: 0; display: block; background: var(--go-ink); opacity: .62; transform-origin: 0 50%; }
-.mu-transport { display: flex; align-items: center; flex: none; }
-.mu-btn {
-  all: unset; box-sizing: border-box; display: grid; place-items: center; flex: none;
-  width: 22px; height: 26px; border-radius: 8px; color: var(--go-ink); cursor: pointer;
-  transform: scale(calc(1 - var(--mu-b, 0) * .14));
-}
-.mu-btn:focus-visible { outline: 2px solid #4c8dff; outline-offset: 1px; }
-.mu-btn.mu-play {
-  width: 28px; height: 28px; border-radius: 50%;
-  background: var(--go-ink); color: rgb(var(--go-glass));
-  box-shadow: 0 4px 10px -4px var(--go-shadow);
-}
-.mu-play-icon { translate: 1px 0; }
-.mu-transport-sm { gap: 0; margin-right: -2px; }
-.mu-transport-sm .mu-btn { width: 19px; }
-.mu-transport-sm .mu-btn.mu-play { width: 27px; height: 27px; margin: 0 1px; }
-.mu-transport-md { gap: 10px; }
-.mu-transport-md .mu-btn { width: 28px; height: 30px; }
-.mu-transport-md .mu-btn.mu-play { width: 34px; height: 34px; }
-.mu-transport-lg { gap: 14px; }
-.mu-transport-lg .mu-btn { width: 32px; height: 34px; }
-.mu-transport-lg .mu-btn.mu-play { width: 40px; height: 40px; }
+.mu-glyph { position: absolute; left: 13px; top: 13px; color: #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+.mu-glyph-ink { left: auto; right: 18px; top: 18px; color: #fa2d48; filter: none; }
 
-/* the pocket */
+/* type */
+.mu-now { display: flex; flex-direction: column; min-width: 0; }
+.mu-title, .mu-artist, .mu-album { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mu-title { font-size: 13px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; }
+.mu-artist { font-size: 11px; line-height: 1.3; color: var(--go-ink-soft); }
+.mu-album { font-size: 11px; line-height: 1.3; color: var(--go-ink-soft); opacity: .8; }
+.mu-kicker { font-size: 10px; font-weight: 600; letter-spacing: .02em; color: var(--go-ink-soft); }
+
+/* progress */
+.mu-progress { display: flex; flex-direction: column; gap: 3px; }
+.mu-line { position: relative; display: block; height: 3px; border-radius: 2px; overflow: hidden; background: var(--go-ink-faint); }
+.mu-line-fill { position: absolute; inset: 0; display: block; background: var(--go-ink); opacity: .6; transform-origin: 0 50%; }
+.mu-times { display: flex; justify-content: space-between; font-size: 10px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; }
+
+/* buttons: round glass */
+.mu-transport { display: flex; align-items: center; }
+.mu-btn {
+  all: unset; box-sizing: border-box; display: grid; place-items: center; flex: none; cursor: pointer;
+  width: 28px; height: 28px; border-radius: 50%; color: var(--go-ink);
+  background: rgba(var(--go-glass), .38);
+  -webkit-backdrop-filter: blur(10px) saturate(1.5); backdrop-filter: blur(10px) saturate(1.5);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.6), inset 0 0 0 .5px rgba(255,255,255,.35), 0 0 0 .5px rgba(0,0,0,.08), 0 calc(3px - var(--mu-b, 0) * 2px) calc(8px - var(--mu-b, 0) * 4px) -3px rgba(0,0,0,.3);
+  transform: scale(calc(1 - var(--mu-b, 0) * .12));
+}
+.mu-root[data-tone="dark"] .mu-btn { box-shadow: inset 0 1px 0 rgba(255,255,255,.16), inset 0 0 0 .5px rgba(255,255,255,.14), 0 calc(3px - var(--mu-b, 0) * 2px) calc(8px - var(--mu-b, 0) * 4px) -3px rgba(0,0,0,.5); }
+.mu-btn:focus-visible { outline: 2px solid #4c8dff; outline-offset: 2px; }
+.mu-play-icon { translate: 1px 0; }
+.mu-transport-sm { gap: 6px; }
+.mu-transport-md { gap: 12px; }
+.mu-transport-md .mu-btn { width: 28px; height: 28px; }
+.mu-transport-md .mu-play { width: 34px; height: 34px; }
+.mu-transport-lg { gap: 16px; }
+.mu-transport-lg .mu-btn { width: 32px; height: 32px; }
+.mu-transport-lg .mu-play { width: 40px; height: 40px; }
+
+/* ---- the queue: sheets that rise and fan into a stack ---- */
 .mu-row {
   --p: max(0, (var(--go-open) - var(--d)) / (1 - var(--d)));
   left: var(--qx); top: calc(var(--qy) + var(--i) * var(--qstep)); width: var(--qw); height: var(--qh);
   border-radius: var(--qr, 10px);
+  opacity: min(1, calc(var(--p) * 3));
   transform-origin: 50% 0%;
   transform:
     translate(calc((1 - var(--p)) * var(--rx)), calc((1 - var(--p)) * (var(--ry) - var(--i) * var(--rystep))))
@@ -795,19 +1006,15 @@ const MU_CSS = `
 }
 .mu-root[data-tone="dark"] .mu-row-btn { color: #f5f5f7; }
 .mu-row-btn:focus-visible { outline: 2px solid #4c8dff; outline-offset: -2px; }
-.mu-row-art { flex: none; width: var(--ra); height: var(--ra); border-radius: 5px; box-shadow: 0 0 0 .5px rgba(0,0,0,.12); }
+.mu-row-art { flex: none; width: var(--ra); height: var(--ra); border-radius: 4px; box-shadow: 0 0 0 .5px rgba(0,0,0,.12); }
 .mu-row-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .mu-row-title, .mu-row-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
 .mu-row-title { font-size: var(--rt, 10.5px); font-weight: 600; letter-spacing: -.005em; }
 .mu-row-artist { font-size: var(--rta, 9px); opacity: .55; }
 .mu-row-dur { flex: none; font-size: 9.5px; opacity: .5; font-variant-numeric: tabular-nums; }
 
-/* the open face */
-.mu-face {
-  position: absolute;
-  opacity: var(--go-open);
-  transform: translateY(calc((1 - var(--go-open)) * 8px));
-}
+/* ---- the open face ---- */
+.mu-face { position: absolute; opacity: var(--go-open); transform: translateY(calc((1 - var(--go-open)) * 8px)); }
 .mu-root:not([data-open]) .mu-face, .mu-root:not([data-open]) .mu-scrub { pointer-events: none; }
 .mu-scrub { position: relative; height: 14px; cursor: pointer; touch-action: none; opacity: var(--go-open); }
 .mu-scrub:focus-visible { outline: 2px solid #4c8dff; outline-offset: 2px; border-radius: 4px; }
@@ -819,65 +1026,55 @@ const MU_CSS = `
   background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.18), 0 2px 5px rgba(0,0,0,.25);
   transform: scale(calc(.75 + var(--go-hover) * .25));
 }
-.mu-face-times { display: flex; justify-content: space-between; font-size: 9.5px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; }
+.mu-now-face .mu-title { font-size: 12px; }
+.mu-now-face .mu-artist { font-size: 10.5px; }
 
 /* ---- small ---- */
-.mu-small { --ax: 14px; --ay: 13px; --as: 92px; --ar: 12px; --adx: -24px; --ady: -25px; --ads: .478; }
-.mu-side {
-  position: absolute; left: 114px; right: 14px; top: 14px; height: 91px;
-  display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end;
-  opacity: calc(1 - var(--go-open) * 1.4);
-  transform: translateY(calc(var(--go-open) * -10px + var(--go-hover) * -2px));
+.mu-small { --atilt: -3deg; --atilt-y: 4deg; }
+.mu-small .mu-art-img { box-shadow: none; }
+.mu-small .mu-art-img .mu-art-sheen { box-shadow: none; }
+.mu-root.mu-small .mu-pane-s .go-pane-tint {
+  background: linear-gradient(180deg, rgba(0,0,0,.2) 0%, rgba(0,0,0,0) 26%, rgba(0,0,0,0) 46%, rgba(0,0,0,.6) 100%);
 }
-.mu-side-times { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; font-variant-numeric: tabular-nums; }
-.mu-side-el { font-size: 11px; font-weight: 600; }
-.mu-side-rem { font-size: 9.5px; }
-.mu-small .mu-row { --qx: 12px; --qy: 76px; --qstep: 30px; --qw: 146px; --qh: 27px; --qr: 9px; --rx: 0px; --ry: 30px; --rystep: 27px; --ra: 19px; --rgap: 6px; --rt: 10.5px; --rta: 9px; }
-.mu-small .mu-row { --rs: calc(.12 - var(--i) * .04); }
-.mu-small .mu-face { left: 68px; right: 12px; top: 13px; display: flex; flex-direction: column; gap: 3px; }
-.mu-small .mu-now-face .mu-title { font-size: 11.5px; }
-.mu-small .mu-now-face .mu-artist { font-size: 10px; }
-.mu-face-time { font-size: 9.5px; font-variant-numeric: tabular-nums; }
-.mu-scrub-s { position: absolute; left: 12px; right: 12px; top: 58px; }
-.mu-pane-s { top: auto; bottom: 0; height: 56px; }
-.mu-pane-row { position: absolute; inset: 0; display: flex; align-items: center; gap: 4px; padding: 2px 8px 0 13px; }
-.mu-pane-row .mu-now { flex: 1; }
+.mu-root.mu-small .mu-pane-s .go-pane-spec { opacity: .5; }
+.mu-now-s { position: absolute; left: 13px; right: 76px; bottom: 13px; }
+.mu-now-s .mu-title { color: #fff; font-size: 13px; text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.mu-now-s .mu-artist { color: rgba(255,255,255,.75); font-size: 11px; }
+.mu-eq-corner { position: absolute; right: 14px; top: 13px; height: 12px; gap: 2px; color: #fff; opacity: calc(.8 + var(--go-hover) * .2); filter: drop-shadow(0 1px 2px rgba(0,0,0,.3)); }
+.mu-eq-corner .mu-bar { width: 2.5px; border-radius: 1.25px; }
+.mu-small .mu-transport-rest { position: absolute; right: 11px; bottom: 13px; }
+.mu-small .mu-transport-rest .mu-btn { color: #fff; background: rgba(255,255,255,.2); }
+.mu-small .mu-transport-rest .mu-play { background: rgba(255,255,255,.3); }
+.mu-small .mu-face { left: 104px; right: 12px; top: 18px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.mu-face-el { font-size: 10px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; }
+.mu-scrub-s { position: absolute; left: 12px; right: 12px; top: 73px; }
+.mu-small .mu-row { --qx: 10px; --qy: 94px; --qstep: 24px; --qw: 150px; --qh: 22px; --qr: 8px; --rx: 0px; --ry: 40px; --rystep: 22px; --ra: 16px; --rgap: 6px; --rt: 10.5px; --rta: 9px; --rs: calc(.12 - var(--i) * .04); }
+.mu-small .mu-row-artist { display: none; }
 
 /* ---- medium ---- */
-.mu-medium { --ax: 20px; --ay: 21px; --as: 128px; --ar: 14px; --adx: 2px; --ady: -29px; --ads: .3125; }
 .mu-medium .mu-row { --qx: 158px; --qy: 16px; --qstep: 48px; --qw: 192px; --qh: 42px; --qr: 12px; --rx: 12px; --ry: 30px; --rystep: 24px; --rs: .05; --rrot: 1.5deg; --ra: 30px; --rgap: 9px; --rt: 11.5px; --rta: 10px; }
 .mu-medium .mu-row-btn { padding: 0 12px 0 6px; }
-.mu-medium .mu-face { left: 26px; width: 120px; top: 108px; display: flex; flex-direction: column; gap: 1px; }
-.mu-medium .mu-now-face { align-items: center; text-align: center; margin-top: 3px; }
-.mu-medium .mu-now-face .mu-title { font-size: 11.5px; max-width: 100%; }
-.mu-medium .mu-now-face .mu-artist { font-size: 10px; max-width: 100%; }
-.mu-pane-m { left: 162px; top: 12px; right: 12px; bottom: 12px; }
-.mu-pane-col { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 14px 16px 10px; }
-.mu-kicker { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--go-ink-soft); margin-bottom: 5px; }
-.mu-pane-m .mu-title { font-size: 14px; }
-.mu-pane-m .mu-artist { font-size: 11.5px; }
-.mu-line.mu-line-m { position: relative; left: auto; right: auto; top: auto; display: block; flex: none; margin-top: auto; height: 3px; border-radius: 2px; }
-.mu-pane-times { display: flex; justify-content: space-between; margin-top: 4px; padding-bottom: 6px; font-size: 9.5px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; }
-.mu-pane-m .mu-transport { align-self: center; }
+.mu-col { position: absolute; left: 166px; right: 20px; top: 22px; bottom: 16px; display: flex; flex-direction: column; }
+.mu-now-m .mu-title { font-size: 14px; }
+.mu-col .mu-progress { margin-top: auto; }
+.mu-col .mu-transport { align-self: center; margin-top: 8px; }
+.mu-medium .mu-face { left: 16px; width: 126px; top: 88px; display: flex; flex-direction: column; gap: 2px; }
 
 /* ---- large ---- */
-.mu-large { --ax: 84px; --ay: 30px; --as: 196px; --ar: 18px; --adx: -116px; --ady: -62px; --ads: .49; }
-.mu-large .mu-row { --qx: 16px; --qy: 140px; --qstep: 42px; --qw: 332px; --qh: 37px; --qr: 11px; --rx: 0px; --ry: 106px; --rystep: 38px; --rs: calc(.1 - var(--i) * .015); --rrot: 1deg; --ra: 27px; --rgap: 9px; --rt: 12px; --rta: 10.5px; }
+.mu-now-l { position: absolute; left: 184px; right: 18px; top: 26px; }
+.mu-now-l .mu-title { font-size: 15px; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.mu-now-l .mu-artist, .mu-now-l .mu-album { font-size: 12px; }
+.mu-strip { position: absolute; left: 20px; right: 20px; top: 184px; display: flex; flex-direction: column; gap: 8px; }
+.mu-strip .mu-transport { align-self: center; }
+.mu-upnext-list { position: absolute; left: 20px; right: 20px; top: 266px; display: flex; flex-direction: column; gap: 5px; }
+.mu-upnext-row { display: flex; align-items: center; gap: 8px; height: 22px; }
+.mu-upnext-art { flex: none; width: 22px; height: 22px; border-radius: 4px; box-shadow: 0 0 0 .5px rgba(0,0,0,.12); }
+.mu-upnext-text { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.mu-upnext-title { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mu-upnext-artist { font-size: 10.5px; color: var(--go-ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mu-upnext-dur { flex: none; font-size: 10px; color: var(--go-ink-soft); }
+.mu-large .mu-face { left: 126px; right: 20px; top: 24px; display: flex; flex-direction: column; gap: 3px; }
+.mu-large .mu-face.mu-face-bottom { left: 0; right: 0; top: auto; bottom: 16px; align-items: center; }
+.mu-large .mu-row { --qx: 16px; --qy: 102px; --qstep: 40px; --qw: 332px; --qh: 35px; --qr: 11px; --rx: 0px; --ry: 120px; --rystep: 36px; --rs: calc(.1 - var(--i) * .015); --rrot: 1deg; --ra: 26px; --rgap: 9px; --rt: 12px; --rta: 10.5px; }
 .mu-large .mu-row-btn { padding: 0 12px 0 5px; }
-.mu-large .mu-face { left: 128px; right: 18px; top: 20px; display: flex; flex-direction: column; gap: 2px; }
-.mu-large .mu-now-face { margin-bottom: 12px; }
-.mu-large .mu-now-face .mu-title { font-size: 15px; }
-.mu-large .mu-now-face .mu-artist { font-size: 12px; }
-.mu-large .mu-face-times { font-size: 10px; }
-.mu-upnext {
-  position: absolute; left: 20px; top: 121px; font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--go-ink-soft);
-  opacity: var(--go-open); transform: translateY(calc((1 - var(--go-open)) * 8px));
-}
-.mu-pane-l { top: auto; bottom: 0; height: 104px; }
-.mu-pane-top { position: absolute; left: 18px; right: 18px; top: 16px; display: flex; align-items: flex-start; gap: 12px; }
-.mu-pane-top .mu-now { flex: 1; }
-.mu-pane-l .mu-title { font-size: 14.5px; }
-.mu-pane-l .mu-artist { font-size: 11.5px; }
-.mu-pane-both { flex: none; font-size: 10px; padding-top: 3px; font-variant-numeric: tabular-nums; }
-.mu-pane-l .mu-transport { position: absolute; left: 0; right: 0; bottom: 10px; justify-content: center; }
 `
