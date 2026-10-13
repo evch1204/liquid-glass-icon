@@ -17,17 +17,19 @@ import * as React from "react"
  * variable, so the geometry moves with real inertia and overshoot:
  *
  * - `--go-px`, `--go-py`   where the pointer is, -1 … 1, easing back to 0
+ * - `--go-vx`, `--go-vy`   how fast the pointer is moving, for lag and slosh
  * - `--go-hover`           0 → 1 while the pointer is over the object
  * - `--go-open`            0 → 1 while the object is open
- * - `--go-press`           0 → 1 while the pointer is held down
+ * - `--go-press`           0 → 1 while held: fast down, bouncy release
+ * - `--go-lift`            how far off the desk it is; shadows follow it
  *
  * The protocol every object follows:
  *
  * - **Rest**: flat and closed.
- * - **Hover / focus**: the object tilts toward the cursor and the pane leans;
- *   contents may rise to peek out.
- * - **Open** (click, Space): a second face. The pane hinges or slides away and
- *   the object shows something it could not show at rest.
+ * - **Hover / focus**: the object lifts and tilts toward the cursor, and the
+ *   pane leans; contents may rise to peek out.
+ * - **Open** (click, Space): a second face. The object is operated — a dome
+ *   lifted, a tape pulled, a page flipped — and shows what it could not at rest.
  * - **Activate** (double-click, Enter): the object hands off to its app.
  * - Escape or a press outside closes it.
  *
@@ -55,48 +57,88 @@ function tick(s: Spring, dt: number): boolean {
   return true
 }
 
+const reduceMotion = () => typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+
+export type SpringOptions = {
+  /** Stiffness for this move. */
+  k?: number
+  /** Damping for this move. */
+  c?: number
+  /** Milliseconds before the move starts: for staging without CSS delays. */
+  delay?: number
+  /** A kick of velocity instead of (or as well as) a new target. */
+  impulse?: number
+}
+
+export type SpringSetter = (target?: number, opts?: SpringOptions) => void
+
 /**
  * A spring you can drive from any component: give it a target, it writes a
- * CSS variable on `ref` every frame until it settles. Good for dock tiles,
- * chips, anything with a single degree of freedom.
+ * CSS variable on `ref` every frame until it settles, plus `<name>-v` with its
+ * velocity. `set(1, { k, c })` changes the character of that one move;
+ * `set(undefined, { impulse: 0.6 })` just kicks it. Under reduced motion the
+ * value jumps to its target and impulses are ignored.
  */
-export function useSpringVar(
-  ref: React.RefObject<HTMLElement | null>,
-  name: string,
-  initial = 0,
-  k = 140,
-  c = 16,
-): (target: number) => void {
+export function useSpringVar(ref: React.RefObject<HTMLElement | null>, name: string, initial = 0, k = 140, c = 16): SpringSetter {
   const s = React.useRef(mk(initial, k, c))
-  // the integrator lives inside an effect so it can refer to itself freely;
-  // callers reach it through this ref
-  const set = React.useRef<(target: number) => void>(() => {})
+  const base = React.useRef({ k, c })
+  const set = React.useRef<SpringSetter>(() => {})
   React.useEffect(() => {
     let raf = 0
     let last = 0
+    const timers = new Set<number>()
+    const reduce = reduceMotion()
+    const write = () => {
+      const el = ref.current
+      if (!el) return
+      el.style.setProperty(name, s.current.x.toFixed(4))
+      el.style.setProperty(name + "-v", s.current.v.toFixed(3))
+    }
     const loop = () => {
       const now = performance.now()
       const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016
       last = now
       const moving = tick(s.current, dt)
-      ref.current?.style.setProperty(name, s.current.x.toFixed(4))
+      write()
       raf = moving ? requestAnimationFrame(loop) : 0
       if (!moving) last = 0
     }
-    set.current = (target: number) => {
-      s.current.t = target
+    const apply = (target: number | undefined, opts: SpringOptions) => {
+      const sp = s.current
+      sp.k = opts.k ?? base.current.k
+      sp.c = opts.c ?? base.current.c
+      if (target !== undefined) sp.t = target
+      if (reduce) {
+        sp.x = sp.t
+        sp.v = 0
+        write()
+        return
+      }
+      if (opts.impulse) sp.v += opts.impulse
       if (!raf) raf = requestAnimationFrame(loop)
+    }
+    set.current = (target, opts = {}) => {
+      if (opts.delay) {
+        const t = window.setTimeout(() => {
+          timers.delete(t)
+          apply(target, opts)
+        }, opts.delay)
+        timers.add(t)
+      } else apply(target, opts)
     }
     return () => {
       cancelAnimationFrame(raf)
+      timers.forEach((t) => window.clearTimeout(t))
       set.current = () => {}
     }
   }, [ref, name])
-  return React.useCallback((target: number) => set.current(target), [])
+  return React.useCallback<SpringSetter>((target, opts) => set.current(target, opts), [])
 }
 
 // ---------------------------------------------------------------------------
 // Context
+
+export type GlassFrame = { px: number; py: number; vx: number; vy: number; hover: number; open: number; press: number; lift: number; in: number }
 
 export type GlassState = {
   hover: boolean
@@ -108,6 +150,10 @@ export type GlassState = {
   activate: () => void
   /** The object's root, for anything that wants to listen to its pointer. */
   rootRef: React.RefObject<HTMLDivElement | null>
+  /** Called every engine frame while anything is moving, with the live spring values. */
+  onFrame: (cb: (f: GlassFrame) => void) => () => void
+  /** The current spring values, readable any time without parsing CSS. */
+  frame: React.RefObject<GlassFrame>
 }
 
 const Ctx = React.createContext<GlassState | null>(null)
@@ -135,6 +181,10 @@ export type GlassObjectProps = {
   onActivate?: () => void
   /** Degrees of tilt toward the cursor. */
   tilt?: number
+  /** `center` turns in mid-air; `base` tips about its bottom edge, like something standing on the desk. */
+  pivot?: "center" | "base"
+  /** How far it rises on hover, 0–1 of the shadow's range. */
+  hoverLift?: number
   /** Corner radius of the object's shadow and clip. */
   radius?: number
   /** Let the contents hang outside the box (for things that rise out). */
@@ -156,6 +206,8 @@ export function GlassObject({
   onOpenChange,
   onActivate,
   tilt = 5,
+  pivot = "center",
+  hoverLift = 0.3,
   radius = 24,
   overflow = "visible",
   appearDelay = 0,
@@ -184,17 +236,30 @@ export function GlassObject({
   const springs = React.useRef({
     px: mk(0, 110, 15),
     py: mk(0, 110, 15),
+    vx: mk(0, 160, 20),
+    vy: mk(0, 160, 20),
     hover: mk(0, 95, 13),
     open: mk(0, 70, 10.5),
-    press: mk(0, 420, 28),
+    press: mk(0, 600, 40),
+    lift: mk(0, 90, 12),
     in: mk(0, 60, 11),
   })
+  const frame = React.useRef<GlassFrame>({ px: 0, py: 0, vx: 0, vy: 0, hover: 0, open: 0, press: 0, lift: 0, in: 0 })
+  const listeners = React.useRef(new Set<(f: GlassFrame) => void>())
+  const onFrame = React.useCallback((cb: (f: GlassFrame) => void) => {
+    listeners.current.add(cb)
+    return () => {
+      listeners.current.delete(cb)
+    }
+  }, [])
+
   // the integrator lives inside an effect so it can refer to itself freely;
   // everything else wakes it through `kick`
   const kickRef = React.useRef<() => void>(() => {})
   React.useEffect(() => {
     let raf = 0
     let last = 0
+    const reduce = reduceMotion()
     const loop = () => {
       const el = rootRef.current
       if (!el) {
@@ -207,9 +272,14 @@ export function GlassObject({
       const s = springs.current
       let moving = false
       for (const key of Object.keys(s) as (keyof typeof s)[]) {
-        if (tick(s[key], dt)) moving = true
+        if (reduce) {
+          s[key].x = s[key].t
+          s[key].v = 0
+        } else if (tick(s[key], dt)) moving = true
         el.style.setProperty("--go-" + key, s[key].x.toFixed(4))
+        frame.current[key] = s[key].x
       }
+      listeners.current.forEach((cb) => cb(frame.current))
       raf = moving ? requestAnimationFrame(loop) : 0
       if (!moving) last = 0
     }
@@ -225,12 +295,18 @@ export function GlassObject({
   const kick = React.useCallback(() => kickRef.current(), [])
 
   React.useEffect(() => {
-    springs.current.hover.t = hover || focused ? 1 : 0
-    springs.current.open.t = open ? 1 : 0
-    springs.current.press.t = pressed ? 1 : 0
-    springs.current.in.t = entered ? 1 : 0
+    const s = springs.current
+    const up = hover || focused
+    s.hover.t = up ? 1 : 0
+    s.open.t = open ? 1 : 0
+    // press goes down hard and comes back with a bounce
+    s.press.t = pressed ? 1 : 0
+    s.press.k = pressed ? 600 : 260
+    s.press.c = pressed ? 40 : 13
+    s.lift.t = (up ? hoverLift : 0) + (open ? 0.4 : 0) - (pressed ? 0.12 : 0)
+    s.in.t = entered ? 1 : 0
     kick()
-  }, [hover, focused, open, pressed, entered, kick])
+  }, [hover, focused, open, pressed, entered, hoverLift, kick])
 
   // ---- entrance -------------------------------------------------------------
   React.useEffect(() => {
@@ -259,11 +335,27 @@ export function GlassObject({
   React.useEffect(() => {
     const el = rootRef.current
     if (!el) return
+    let lastX = 0
+    let lastY = 0
+    let lastT = 0
     const move = (e: PointerEvent) => {
       if (e.pointerType === "touch") return
       const r = el.getBoundingClientRect()
-      springs.current.px.t = Math.max(-1, Math.min(1, ((e.clientX - r.left) / r.width) * 2 - 1))
-      springs.current.py.t = Math.max(-1, Math.min(1, ((e.clientY - r.top) / r.height) * 2 - 1))
+      const px = Math.max(-1, Math.min(1, ((e.clientX - r.left) / r.width) * 2 - 1))
+      const py = Math.max(-1, Math.min(1, ((e.clientY - r.top) / r.height) * 2 - 1))
+      const s = springs.current
+      s.px.t = px
+      s.py.t = py
+      const now = performance.now()
+      if (lastT) {
+        const dt = Math.max(8, now - lastT) / 1000
+        // velocity in object-widths per second, clamped so a flick reads as a flick
+        s.vx.t = Math.max(-6, Math.min(6, (px - lastX) / dt / 2))
+        s.vy.t = Math.max(-6, Math.min(6, (py - lastY) / dt / 2))
+      }
+      lastX = px
+      lastY = py
+      lastT = now
       kick()
     }
     const enter = (e: PointerEvent) => {
@@ -272,14 +364,27 @@ export function GlassObject({
     const leave = () => {
       setHover(false)
       setPressed(false)
-      springs.current.px.t = 0
-      springs.current.py.t = 0
+      const s = springs.current
+      s.px.t = 0
+      s.py.t = 0
+      s.vx.t = 0
+      s.vy.t = 0
+      lastT = 0
       kick()
     }
     const down = (e: PointerEvent) => {
       if (e.button === 0) setPressed(true)
     }
     const up = () => setPressed(false)
+    // velocity decays to zero while the pointer rests
+    const idle = window.setInterval(() => {
+      const s = springs.current
+      if ((s.vx.t || s.vy.t) && performance.now() - lastT > 80) {
+        s.vx.t = 0
+        s.vy.t = 0
+        kick()
+      }
+    }, 80)
     el.addEventListener("pointermove", move)
     el.addEventListener("pointerenter", enter)
     el.addEventListener("pointerleave", leave)
@@ -287,6 +392,7 @@ export function GlassObject({
     el.addEventListener("pointerup", up)
     el.addEventListener("pointercancel", up)
     return () => {
+      window.clearInterval(idle)
       el.removeEventListener("pointermove", move)
       el.removeEventListener("pointerenter", enter)
       el.removeEventListener("pointerleave", leave)
@@ -317,8 +423,8 @@ export function GlassObject({
   }, [open, setOpen])
 
   const value = React.useMemo<GlassState>(
-    () => ({ hover, open, pressed, focused, tone, setOpen, activate, rootRef }),
-    [hover, open, pressed, focused, tone, setOpen, activate],
+    () => ({ hover, open, pressed, focused, tone, setOpen, activate, rootRef, onFrame, frame }),
+    [hover, open, pressed, focused, tone, setOpen, activate, onFrame],
   )
 
   return (
@@ -330,6 +436,7 @@ export function GlassObject({
         data-hover={hover || undefined}
         data-open={open || undefined}
         data-entered={entered || undefined}
+        data-pivot={pivot}
         style={
           {
             width,
@@ -338,15 +445,18 @@ export function GlassObject({
             "--go-radius": radius + "px",
             "--go-px": 0,
             "--go-py": 0,
+            "--go-vx": 0,
+            "--go-vy": 0,
             "--go-hover": 0,
             "--go-open": 0,
             "--go-press": 0,
+            "--go-lift": 0,
             "--go-in": 0,
             ...style,
           } as React.CSSProperties
         }
       >
-        <style href="glass-object" precedence="glass-engine">{GO_CSS}</style>
+        <GlassObjectStyles />
         <button
           ref={hitRef}
           type="button"
@@ -369,7 +479,8 @@ export function GlassObject({
           }}
         />
         <div className="go-tilt" style={{ overflow }}>
-          <div className="go-shadow" aria-hidden="true" />
+          <div className="go-shadow go-shadow-contact" aria-hidden="true" />
+          <div className="go-shadow go-shadow-ambient" aria-hidden="true" />
           {children}
         </div>
       </div>
@@ -393,7 +504,7 @@ export type LiquidRecipe = {
   gloss?: number
 }
 
-export const LIQUIDS: Record<"milk" | "smoke" | "pearl" | "mint" | "rose" | "sky" | "butter", LiquidRecipe> = {
+export const LIQUIDS: Record<"milk" | "smoke" | "pearl" | "mint" | "rose" | "sky" | "butter" | "brass" | "brassDark", LiquidRecipe> = {
   milk: { colors: ["#e4e5ea", "#f3f3f6", "#ffffff", "#eceef2"], gloss: 0.5 },
   smoke: { colors: ["#17171a", "#26262b", "#3a3a41", "#1d1d21"], gloss: 0.35 },
   pearl: { colors: ["#dfe3ea", "#f6f3f0", "#ffffff", "#e6e1ea"], gloss: 0.6 },
@@ -401,6 +512,8 @@ export const LIQUIDS: Record<"milk" | "smoke" | "pearl" | "mint" | "rose" | "sky
   rose: { colors: ["#f0dcdf", "#fbeff0", "#ffffff", "#f3e2e6"], gloss: 0.5 },
   sky: { colors: ["#d9e4f2", "#edf3fb", "#ffffff", "#dde7f3"], gloss: 0.55 },
   butter: { colors: ["#f1e7cf", "#fbf5e6", "#ffffff", "#f3ecd8"], gloss: 0.5 },
+  brass: { colors: ["#e9e1d2", "#f6f1e6", "#ffffff", "#efe6d4"], gloss: 0.65, speed: 0.7, scale: 1.2 },
+  brassDark: { colors: ["#16140f", "#24201a", "#3a3428", "#1c1915"], gloss: 0.45, speed: 0.7, scale: 1.2 },
 }
 
 function hex(c: string): [number, number, number] {
@@ -410,11 +523,21 @@ function hex(c: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
 }
 
+/** Imperative handle: disturb the liquid from a tick, a shake, a needle drop. */
+export type LiquidHandle = {
+  /** x, y in 0–1 across the canvas. */
+  ripple: (x: number, y: number, strength?: number) => void
+  /** Scales the flow speed and ripple decay; 1 is calm, 3 is agitated. Eases back on its own. */
+  energy: (e: number) => void
+}
+
 export function LiquidCanvas({
   recipe = LIQUIDS.milk,
   seed = 1,
   cells = 72,
   fps = 30,
+  energy = 1,
+  ref,
   className,
   style,
 }: {
@@ -423,22 +546,27 @@ export function LiquidCanvas({
   /** Cells across; rows follow the aspect ratio. */
   cells?: number
   fps?: number
+  /** Base energy. */
+  energy?: number
+  ref?: React.Ref<LiquidHandle>
   className?: string
   style?: React.CSSProperties
 }) {
-  const ref = React.useRef<HTMLCanvasElement>(null)
+  const canvasRef = React.useRef<HTMLCanvasElement>(null)
   const glass = React.useContext(Ctx)
   const key = JSON.stringify(recipe)
+  const handle = React.useRef<LiquidHandle>({ ripple: () => {}, energy: () => {} })
+  React.useImperativeHandle(ref, () => ({ ripple: (x, y, s) => handle.current.ripple(x, y, s), energy: (e) => handle.current.energy(e) }), [])
 
   React.useEffect(() => {
-    const c = ref.current
+    const c = canvasRef.current
     if (!c) return
     const r = JSON.parse(key) as LiquidRecipe
     const speed = r.speed ?? 1
     const scale = r.scale ?? 1
     const gloss = r.gloss ?? 0.5
     const stops = r.colors.map(hex)
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    const reduce = reduceMotion()
     const box = c.getBoundingClientRect()
     const aspect = box.width && box.height ? box.height / box.width : 0.75
     const W = cells
@@ -451,12 +579,15 @@ export function LiquidCanvas({
     const d = img.data
     const o1 = seed * 1.7
     const o2 = seed * 0.9
-    // the ripple: where the pointer last touched, and how strongly
+    // the ripple: where the liquid was last touched, and how strongly
     let rx = 0.5
     let ry = 0.5
     let ripple = 0
     let lx = 0
     let ly = 0
+    let en = energy
+    let enTarget = energy
+    let flow = 0
     const root = glass?.rootRef.current
     const onMove = (e: PointerEvent) => {
       const b = c.getBoundingClientRect()
@@ -466,6 +597,18 @@ export function LiquidCanvas({
     }
     const onDown = () => {
       ripple = 1.4
+    }
+    handle.current = {
+      ripple: (x, y, s = 1) => {
+        rx = x
+        ry = y
+        ripple = Math.min(2, ripple + s)
+        if (!raf && visible) raf = requestAnimationFrame(frame)
+      },
+      energy: (e) => {
+        enTarget = e
+        if (!raf && visible) raf = requestAnimationFrame(frame)
+      },
     }
     const host = root ?? c.parentElement
     host?.addEventListener("pointermove", onMove)
@@ -484,9 +627,9 @@ export function LiquidCanvas({
     io?.observe(c)
 
     const paint = (t: number) => {
-      if (root) {
-        lx = parseFloat(root.style.getPropertyValue("--go-px") || "0")
-        ly = parseFloat(root.style.getPropertyValue("--go-py") || "0")
+      if (glass) {
+        lx = glass.frame.current.px
+        ly = glass.frame.current.py
       }
       const n = stops.length - 1
       for (let y = 0; y < H; y++) {
@@ -524,9 +667,13 @@ export function LiquidCanvas({
       raf = 0
       if (!visible || document.hidden) return
       if (now - last >= 1000 / fps) {
+        const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / fps
         last = now
         ripple *= 0.94
-        paint((now / 1000) * speed)
+        en += (enTarget - en) * 0.08
+        if (enTarget > energy) enTarget += (energy - enTarget) * 0.02
+        flow += dt * speed * en
+        paint(flow + seed)
       }
       if (!reduce) raf = requestAnimationFrame(frame)
     }
@@ -542,10 +689,11 @@ export function LiquidCanvas({
       document.removeEventListener("visibilitychange", onVis)
       host?.removeEventListener("pointermove", onMove)
       host?.removeEventListener("pointerdown", onDown)
+      handle.current = { ripple: () => {}, energy: () => {} }
     }
-  }, [key, seed, cells, fps, glass])
+  }, [key, seed, cells, fps, energy, glass])
 
-  return <canvas ref={ref} aria-hidden="true" className={"go-liquid" + (className ? " " + className : "")} style={style} />
+  return <canvas ref={canvasRef} aria-hidden="true" className={"go-liquid" + (className ? " " + className : "")} style={style} />
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +702,7 @@ export function LiquidCanvas({
 export type GlassPaneProps = {
   /** Which edge it is hinged on. `none` makes it a flat sheet. */
   hinge?: "bottom" | "top" | "left" | "right" | "none"
-  /** Degrees it leans on hover. Negative leans toward you on a bottom hinge. */
+  /** Degrees it leans on hover. Negative brings the free edge toward you. */
   lean?: number
   /** Degrees it leans when open. */
   openLean?: number
@@ -562,10 +710,22 @@ export type GlassPaneProps = {
   openShift?: number
   /** Fade it out when open, 0–1 of its opacity to remove. */
   openFade?: number
-  /** Corner radius. */
-  radius?: number
-  /** Thickness of the frost, 0–1. */
-  frost?: number
+  /** Pixels it rises on hover, straight up. */
+  lift?: number
+  /**
+   * Which CSS variables drive the hover and open motion. Defaults to the
+   * engine's `--go-hover` and `--go-open`; a widget with its own spring
+   * (a dome, a cover) names it here, e.g. `{ open: "--dome" }`.
+   */
+  drive?: { hover?: string; open?: string }
+  /** Corner radius, or any CSS border-radius value such as `68px 68px 12px 12px`. */
+  radius?: number | string
+  /** A clip-path for shapes that are not rounded rectangles. */
+  shape?: string
+  /** Thickness of the frost, 0–1, or a CSS variable such as `var(--frost)`. */
+  frost?: number | string
+  /** Clear glass: no white fade, just rim, refraction and a highlight. For domes and globes. */
+  clear?: boolean
   className?: string
   style?: React.CSSProperties
   children?: React.ReactNode
@@ -577,29 +737,35 @@ export function GlassPane({
   openLean = -22,
   openShift = 0,
   openFade = 0,
+  lift = 0,
+  drive,
   radius = 20,
+  shape,
   frost = 1,
+  clear = false,
   className,
   style,
   children,
 }: GlassPaneProps) {
+  const hv = `var(${drive?.hover ?? "--go-hover"})`
+  const op = `var(${drive?.open ?? "--go-open"})`
   const origin = { bottom: "50% 100%", top: "50% 0%", left: "0% 50%", right: "100% 50%", none: "50% 50%" }[hinge]
   const axis = hinge === "left" || hinge === "right" ? "rotateY" : "rotateX"
   const sign = hinge === "top" || hinge === "left" ? -1 : 1
+  const shift = `translateY(calc(${op} * ${openShift}px - ${hv} * ${lift}px))`
   const transform =
-    hinge === "none"
-      ? `translateY(calc(var(--go-open) * ${openShift}px))`
-      : `perspective(900px) ${axis}(calc(var(--go-hover) * ${lean * sign}deg + var(--go-open) * ${openLean * sign}deg)) translateY(calc(var(--go-open) * ${openShift}px))`
+    hinge === "none" ? shift : `perspective(900px) ${axis}(calc(${hv} * ${lean * sign}deg + ${op} * ${openLean * sign}deg)) ${shift}`
   return (
     <div
-      className={"go-pane" + (className ? " " + className : "")}
+      className={"go-pane" + (clear ? " go-pane--clear" : "") + (className ? " " + className : "")}
       style={
         {
-          "--pane-radius": radius + "px",
+          "--pane-radius": typeof radius === "number" ? radius + "px" : radius,
           "--pane-frost": frost,
+          clipPath: shape,
           transformOrigin: origin,
           transform,
-          opacity: openFade ? `calc(1 - var(--go-open) * ${openFade})` : undefined,
+          opacity: openFade ? `calc(1 - ${op} * ${openFade})` : undefined,
           ...style,
         } as React.CSSProperties
       }
@@ -662,11 +828,22 @@ const GO_CSS = `
   z-index: 1;
   pointer-events: none;
   border-radius: var(--go-radius);
+  transform-origin: 50% 50%;
   transform:
     perspective(1200px)
+    translateY(calc(var(--go-lift) * -6px))
     rotateX(calc(var(--go-py) * var(--go-tilt) * -1 * var(--go-hover)))
     rotateY(calc(var(--go-px) * var(--go-tilt) * var(--go-hover)))
-    scale(calc(1 + var(--go-hover) * .018 - var(--go-press) * .022));
+    scale(calc(1 + var(--go-hover) * .018 - var(--go-press) * .012), calc(1 + var(--go-hover) * .018 - var(--go-press) * .03));
+}
+.go-root[data-pivot="base"] .go-tilt {
+  transform-origin: 50% 100%;
+  transform:
+    perspective(1200px)
+    translateY(calc(var(--go-lift) * -6px))
+    rotateX(calc(var(--go-py) * var(--go-tilt) * -.6 * var(--go-hover) - var(--go-hover) * 2deg))
+    rotateY(calc(var(--go-px) * var(--go-tilt) * var(--go-hover)))
+    scale(calc(1 + var(--go-hover) * .012 - var(--go-press) * .012), calc(1 + var(--go-hover) * .012 - var(--go-press) * .03));
 }
 .go-tilt .go-live { pointer-events: auto; }
 .go-shadow {
@@ -677,9 +854,18 @@ const GO_CSS = `
   height: 40%;
   border-radius: 50%;
   background: var(--go-shadow);
-  filter: blur(22px);
-  opacity: calc(.6 + var(--go-hover) * .3);
-  transform: translate(calc(var(--go-px) * -8px), calc(var(--go-hover) * 6px)) scale(calc(1 + var(--go-hover) * .06));
+}
+/* a sharp contact shadow that fades as the object lifts */
+.go-shadow-contact {
+  left: 4%; right: 4%; bottom: -2px; height: 18%;
+  filter: blur(6px);
+  opacity: calc(.5 - var(--go-lift) * .6);
+}
+/* a soft ambient shadow that falls further and spreads as the object lifts */
+.go-shadow-ambient {
+  filter: blur(calc(22px + var(--go-lift) * 14px));
+  opacity: calc(.45 + var(--go-lift) * .3);
+  transform: translate(calc(var(--go-px) * -8px), calc(4px + var(--go-lift) * 10px)) scale(calc(1 + var(--go-lift) * .08));
 }
 .go-liquid {
   position: absolute;
@@ -728,6 +914,18 @@ const GO_CSS = `
 .go-root[data-tone="dark"] .go-pane-rim { opacity: calc(.4 + var(--go-hover) * .2); }
 .go-pane-body { position: absolute; inset: 0; border-radius: inherit; }
 
+/* clear glass: a dome, a globe, a dust cover */
+.go-pane--clear { box-shadow: inset 0 0 0 1px rgba(255,255,255,.7), inset 0 -10px 18px rgba(255,255,255,.3), inset 0 10px 24px rgba(255,255,255,.12), 0 0 0 .5px rgba(0,0,0,.08), 0 14px 30px -14px var(--go-shadow); }
+.go-pane--clear .go-pane-tint {
+  background:
+    radial-gradient(60% 40% at calc(35% + var(--go-px) * 10%) calc(28% + var(--go-py) * 8%), rgba(255,255,255,.55), rgba(255,255,255,0) 70%),
+    linear-gradient(100deg, rgba(255,255,255,0) 18%, rgba(255,255,255,.28) 22%, rgba(255,255,255,0) 30%, rgba(255,255,255,0) 74%, rgba(255,255,255,.5) 78%, rgba(255,255,255,0) 80%),
+    linear-gradient(180deg, rgba(var(--go-glass), calc(.08 * var(--pane-frost))), rgba(var(--go-glass), calc(.22 * var(--pane-frost))));
+  background-position: 0 0, calc(var(--go-px) * -10px) 0, 0 0;
+}
+.go-pane--clear .go-pane-rim { opacity: calc(.95 + var(--go-hover) * .05); }
+.go-root[data-tone="dark"] .go-pane--clear { box-shadow: inset 0 0 0 1px rgba(255,255,255,.28), inset 0 -10px 18px rgba(255,255,255,.08), 0 0 0 .5px rgba(255,255,255,.1), 0 14px 30px -14px var(--go-shadow); }
+
 .go-sheet {
   position: absolute;
   box-sizing: border-box;
@@ -750,5 +948,9 @@ const GO_CSS = `
  * rules of equal specificity always win over the engine's defaults.
  */
 export function GlassObjectStyles() {
-  return <style href="glass-object" precedence="glass-engine">{GO_CSS}</style>
+  return (
+    <style href="glass-object" precedence="glass-engine">
+      {GO_CSS}
+    </style>
+  )
 }
