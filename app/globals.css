@@ -1,0 +1,233 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+/* ---------------------------------------------------------------------------
+   Glass system — shared by every window, widget, dock and menu on the desktop.
+   `light` tone is milk glass, `dark` tone is smoked glass. The desktop toggles
+   the `.dark` class on <html>, so `dark:` variants and these tokens both work.
+--------------------------------------------------------------------------- */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.58);
+  --glass-bg-strong: rgba(252, 252, 253, 0.78);
+  --glass-bg-thin: rgba(255, 255, 255, 0.34);
+  --glass-rim: rgba(255, 255, 255, 0.9);
+  --glass-edge: rgba(0, 0, 0, 0.12);
+  --glass-shadow: 0 30px 70px -24px rgba(10, 12, 20, 0.45), 0 8px 20px -10px rgba(10, 12, 20, 0.2);
+  --glass-ink: #141416;
+  --glass-ink-soft: rgba(20, 20, 22, 0.56);
+  --glass-ink-faint: rgba(20, 20, 22, 0.1);
+  --glass-hover: rgba(20, 20, 22, 0.06);
+  --glass-accent: #3b82f6;
+  --glass-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --glass-spring: cubic-bezier(0.34, 1.36, 0.5, 1);
+  --dot-color: rgba(20, 20, 22, 0.16);
+}
+.dark {
+  --glass-bg: rgba(28, 28, 32, 0.6);
+  --glass-bg-strong: rgba(22, 22, 26, 0.8);
+  --glass-bg-thin: rgba(28, 28, 32, 0.38);
+  --glass-rim: rgba(255, 255, 255, 0.16);
+  --glass-edge: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 30px 70px -24px rgba(0, 0, 0, 0.8), 0 8px 20px -10px rgba(0, 0, 0, 0.5);
+  --glass-ink: #f5f5f7;
+  --glass-ink-soft: rgba(245, 245, 247, 0.6);
+  --glass-ink-faint: rgba(245, 245, 247, 0.12);
+  --glass-hover: rgba(255, 255, 255, 0.08);
+  --glass-accent: #60a5fa;
+  --dot-color: rgba(255, 255, 255, 0.14);
+}
+
+@layer components {
+  /* A frosted panel. Put content inside; it already has rim, edge and shadow. */
+  .glass {
+    position: relative;
+    color: var(--glass-ink);
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(28px) saturate(1.6);
+    backdrop-filter: blur(28px) saturate(1.6);
+    box-shadow:
+      inset 0 1px 0 var(--glass-rim),
+      0 0 0 0.5px var(--glass-edge),
+      var(--glass-shadow);
+  }
+  .glass-strong {
+    background: var(--glass-bg-strong);
+  }
+  .glass-thin {
+    background: var(--glass-bg-thin);
+    -webkit-backdrop-filter: blur(18px) saturate(1.5);
+    backdrop-filter: blur(18px) saturate(1.5);
+  }
+  /* A faint top-left light on any glass, for depth. */
+  .glass-sheen::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.22) 0%, rgba(255, 255, 255, 0) 30%),
+      radial-gradient(120% 70% at 85% 0%, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 60%);
+  }
+  .dark .glass-sheen::before {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 30%),
+      radial-gradient(120% 70% at 85% 0%, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 60%);
+  }
+  /* The dotted desk / canvas. */
+  .dot-canvas {
+    background-image: radial-gradient(var(--dot-color) 1.1px, transparent 1.4px);
+    background-size: 22px 22px;
+  }
+  .ink { color: var(--glass-ink); }
+  .ink-soft { color: var(--glass-ink-soft); }
+  .ink-faint { color: var(--glass-ink-faint); }
+  .hover-glass:hover { background: var(--glass-hover); }
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+}
+
+@keyframes glass-window-in {
+  from { opacity: 0; transform: translateY(18px) scale(0.94); filter: blur(6px); }
+  to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes glass-window-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: translateY(10px) scale(0.96); filter: blur(4px); }
+}
+@keyframes glass-widget-in {
+  from { opacity: 0; transform: translateY(22px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* stop, don't speed up: a looping animation at 0.01ms would flicker */
+  .glass, .glass *, .dot-canvas { transition: none !important; animation: none !important; }
+}
