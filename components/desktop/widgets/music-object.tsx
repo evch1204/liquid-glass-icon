@@ -2,29 +2,29 @@
 
 import * as React from "react"
 import { Music, Pause, Play, SkipBack, SkipForward } from "lucide-react"
-import { GlassObject, GlassPane, GlassSheet, LiquidCanvas, useGlass, useSpringVar, type LiquidHandle, type LiquidRecipe } from "@/components/ui/glass-object"
+import { GlassObject, GlassPane, LiquidCanvas, useGlass, useSpringVar, type LiquidHandle, type LiquidRecipe } from "@/components/ui/glass-object"
 import { ART_PRESETS, createArtJob, type ArtJob, type ArtPreset, type ArtRecipe } from "@/components/ui/glass-folder-cards"
 import { WIDGET, type WidgetSize } from "../glass"
 import { useWindowManager } from "../window-manager"
 
 /**
- * Music — the Now Playing widget, drawn as an object.
+ * Music — the Now Playing widget, and an album that is also a record.
  *
- * At rest it reads like the macOS widget: the album art, the title and
- * artist, the transport. Underneath it is a thing with layers: a liquid
- * light tinted from the album, the art tile, one glass pane carrying the
- * type and the buttons, and — hidden behind the art — the record itself.
+ * At rest it is the macOS widget: the album art, the title and artist, the
+ * transport, on one flat glass pane over a liquid light tinted from the
+ * album. Nothing ever leaves the card and the card never changes shape.
  *
- * - **Rest**: small is the art edge to edge under a thin frost with white
- *   type; medium and large are art on a milk-glass pane with the controls.
- * - **Hover**: the pane leans back and the object lifts; the art lifts 4px and
- *   tilts a touch more than the object; the equaliser bars wake.
- * - **Open** (click): the pane hinges down and away; the art slides up and
- *   shrinks, and the record slides out from behind it — a translucent
- *   coloured disc whose label is the art. Its angular velocity is a spring
- *   integrated into `--spin` every frame, so it spins up while playing and
- *   coasts down when paused. The next tracks rise as sheets fanning into a
- *   stack, and a scrubber appears under the art.
+ * - **Hover**: the art tile lifts 3px with a spreading shadow and tilts
+ *   gently toward the pointer; the equaliser bars wake; a light sweep crosses
+ *   the art with the pointer.
+ * - **Open** (click): the art morphs into a record where it stands. Its
+ *   corners spring from a tile to a circle (`--disc`), grooves fade in over
+ *   the art, the art shrinks to the label, a spindle appears, and the disc
+ *   turns. Its angular velocity is a spring integrated into `--spin` every
+ *   frame: it spins up while playing and coasts down on pause. On medium and
+ *   large the progress bar becomes an arc around the disc.
+ * - **Close** (click, Escape): the disc coasts round to where it started and
+ *   the corners spring back: the record is the album art again.
  * - **Activate** (double-click, Enter): the Music app.
  */
 
@@ -347,75 +347,6 @@ function Equalizer({ className }: { className?: string }) {
     </span>
   )
 }
-function Scrubber({ className }: { className?: string }) {
-  const { open } = useGlass()
-  const index = useIndex()
-  const ref = React.useRef<HTMLDivElement>(null)
-  const fill = React.useRef<HTMLSpanElement>(null)
-  const rail = React.useRef<HTMLSpanElement>(null)
-  const write = React.useCallback((p: Player) => {
-    const d = TRACKS[p.index].duration
-    const f = (p.position / d).toFixed(4)
-    if (fill.current) fill.current.style.transform = `scaleX(${f})`
-    if (rail.current) rail.current.style.transform = `translateX(${(Number(f) * 100).toFixed(2)}%)`
-    ref.current?.setAttribute("aria-valuenow", String(Math.floor(p.position)))
-    ref.current?.setAttribute("aria-valuetext", fmt(p.position) + " of " + fmt(d))
-  }, [])
-  usePlayerDOM(write)
-
-  const seekAt = (clientX: number) => {
-    const el = ref.current
-    if (!el) return
-    const r = el.getBoundingClientRect()
-    const f = Math.max(0, Math.min(1, (clientX - r.left) / r.width))
-    store.seek(f * TRACKS[player.index].duration)
-  }
-
-  return (
-    <div
-      ref={ref}
-      role="slider"
-      tabIndex={open ? 0 : -1}
-      aria-hidden={!open}
-      aria-label="Playback position"
-      aria-valuemin={0}
-      aria-valuenow={Math.floor(INITIAL.position)}
-      aria-valuemax={TRACKS[index].duration}
-      className={"mu-scrub go-live" + (className ? " " + className : "")}
-      onPointerDown={(e) => {
-        e.stopPropagation()
-        e.currentTarget.setPointerCapture(e.pointerId)
-        seekAt(e.clientX)
-      }}
-      onPointerMove={(e) => {
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) seekAt(e.clientX)
-      }}
-      onPointerUp={(e) => {
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
-      }}
-      onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => {
-        const step = e.key === "ArrowRight" || e.key === "ArrowUp" ? 5 : e.key === "ArrowLeft" || e.key === "ArrowDown" ? -5 : 0
-        if (step) {
-          e.preventDefault()
-          e.stopPropagation()
-          store.seek(player.position + step)
-        } else if (e.key === "Home" || e.key === "End") {
-          e.preventDefault()
-          store.seek(e.key === "Home" ? 0 : TRACKS[player.index].duration)
-        }
-      }}
-    >
-      <span className="mu-scrub-track">
-        <span ref={fill} className="mu-scrub-fill" />
-      </span>
-      <span ref={rail} className="mu-scrub-rail">
-        <span className="mu-scrub-knob" />
-      </span>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Albums and the record's colour
@@ -429,7 +360,7 @@ const ALBUM: Record<string, string> = {
   t6: "Undertow",
 }
 
-/** The vinyl's colour: the album's most saturated mid-tone, at 78% so the liquid shows through. */
+/** The vinyl's colour: the album's most saturated mid-tone, at 78% so the light shows through. */
 function vinylOf(track: Track): string {
   const cs = recipeOf(track.art).colors
   const sat = (c: string) => {
@@ -444,34 +375,15 @@ function vinylOf(track: Track): string {
   return pick + "c7"
 }
 
-// ---------------------------------------------------------------------------
-// Geometry: where the art sits at rest and open, and where the record slides out.
-
-type Box = { x: number; y: number; s: number }
-type Geo = { art: Box; artR: number; open: Box; record: Box }
-
-const GEO: Record<WidgetSize, Geo> = {
-  small: { art: { x: 0, y: 0, s: 170 }, artR: 24, open: { x: 12, y: 12, s: 56 }, record: { x: 42, y: 13, s: 54 } },
-  medium: { art: { x: 21, y: 21, s: 128 }, artR: 12, open: { x: 16, y: 16, s: 64 }, record: { x: 48, y: 17, s: 62 } },
-  large: { art: { x: 20, y: 20, s: 148 }, artR: 14, open: { x: 20, y: 20, s: 64 }, record: { x: 52, y: 21, s: 62 } },
-}
-
-/** CSS variables that move the art from its rest box to its open box (scale about its centre). */
-function artVars(g: Geo): React.CSSProperties {
-  const { art: a, open: o } = g
-  return {
-    "--ax": a.x + "px",
-    "--ay": a.y + "px",
-    "--as": a.s + "px",
-    "--ar": g.artR + "px",
-    "--adx": o.x + o.s / 2 - (a.x + a.s / 2) + "px",
-    "--ady": o.y + o.s / 2 - (a.y + a.s / 2) + "px",
-    "--ads": (1 - o.s / a.s).toFixed(4),
-  } as React.CSSProperties
+/** Where the art tile sits, and its corner radius as a tile. */
+const ART: Record<WidgetSize, { x: number; y: number; s: number; r: number }> = {
+  small: { x: 0, y: 0, s: 170, r: 24 },
+  medium: { x: 21, y: 21, s: 128, r: 16 },
+  large: { x: 20, y: 20, s: 148, r: 16 },
 }
 
 // ---------------------------------------------------------------------------
-// The deck: the record's spin (ω is a spring, integrated into --spin) and the liquid's energy.
+// The deck: the morph (--disc), the spin (ω integrated into --spin) and the liquid's energy.
 
 const DeckCtx = React.createContext<React.RefObject<LiquidHandle | null> | null>(null)
 
@@ -479,47 +391,97 @@ function Deck({ size, children }: { size: WidgetSize; children: React.ReactNode 
   const ref = React.useRef<HTMLDivElement>(null)
   const liquid = React.useRef<LiquidHandle | null>(null)
   const playing = usePlaying()
-  const spinTo = React.useRef<(on: boolean) => void>(() => {})
+  const { open } = useGlass()
+  const disc = useSpringVar(ref, "--disc", 0, 70, 11)
+  const drive = React.useRef<(mode: "spin" | "coast" | "home", onHome?: () => void) => void>(() => {})
 
   React.useEffect(() => {
     const el = ref.current
     if (!el) return
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-    const s = { w: 0, v: 0, t: 0, k: 5, c: 4.2, a: 0 }
+    // ω is a spring toward a target speed; going home, the angle is a spring toward a whole turn
+    const s = { a: 0, w: 0, v: 0, t: 0, k: 5, c: 4.2, home: false, ha: 0, cb: undefined as (() => void) | undefined }
     let raf = 0
     let last = 0
+    const write = () => el.style.setProperty("--spin", (((s.a % 360) + 360) % 360).toFixed(2))
     const loop = (now: number) => {
       const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016
       last = now
-      const acc = -s.k * (s.w - s.t) - s.c * s.v
-      s.v += acc * dt
-      s.w += s.v * dt
-      s.a = (s.a + s.w * dt) % 360
-      el.style.setProperty("--spin", s.a.toFixed(2))
-      if (s.t === 0 && Math.abs(s.w) < 0.4 && Math.abs(s.v) < 0.4) {
-        s.w = 0
-        s.v = 0
+      let done = false
+      if (s.home) {
+        const acc = -s.k * (s.a - s.ha) - s.c * s.w
+        s.w += acc * dt
+        s.a += s.w * dt
+        if (s.cb && Math.abs(s.a - s.ha) < 24 && Math.abs(s.w) < 40) {
+          s.cb()
+          s.cb = undefined
+        }
+        if (Math.abs(s.a - s.ha) < 0.05 && Math.abs(s.w) < 0.5) {
+          s.a = 0
+          s.w = 0
+          done = true
+        }
+      } else {
+        const acc = -s.k * (s.w - s.t) - s.c * s.v
+        s.v += acc * dt
+        s.w += s.v * dt
+        s.a += s.w * dt
+        if (s.t === 0 && Math.abs(s.w) < 0.4 && Math.abs(s.v) < 0.4) {
+          s.w = 0
+          s.v = 0
+          done = true
+        }
+      }
+      write()
+      if (done) {
         raf = 0
         last = 0
         return
       }
       raf = requestAnimationFrame(loop)
     }
-    spinTo.current = (on) => {
-      // 33⅓ rpm is 200°/s: up in ~1.2s, coasting down in ~2.5s
-      s.t = on ? 200 : 0
-      s.k = on ? 5 : 1.6
-      s.c = on ? 4.2 : 2.4
-      if (!reduce && !raf) raf = requestAnimationFrame(loop)
+    drive.current = (mode, onHome) => {
+      s.cb = undefined
+      if (mode === "home") {
+        s.home = true
+        s.k = 4
+        s.c = 4
+        // the next whole turn ahead of where it would coast to; back to the nearest one if it is barely moving
+        s.ha = Math.abs(s.w) > 5 ? Math.ceil((s.a + s.w * 0.5) / 360) * 360 : Math.round(s.a / 360) * 360
+        if (reduce || (Math.abs(s.a - s.ha) < 0.5 && Math.abs(s.w) < 0.5)) {
+          s.a = 0
+          s.w = 0
+          write()
+          onHome?.()
+          return
+        }
+        s.cb = onHome
+      } else {
+        s.home = false
+        s.v = 0
+        // 33⅓ rpm is 200°/s: up in ~1.2s, coasting down in ~2.5s
+        s.t = mode === "spin" ? 200 : 0
+        s.k = mode === "spin" ? 5 : 1.6
+        s.c = mode === "spin" ? 4.2 : 2.4
+        if (reduce) return
+      }
+      if (!raf) raf = requestAnimationFrame(loop)
     }
     return () => {
       cancelAnimationFrame(raf)
-      spinTo.current = () => {}
+      drive.current = () => {}
     }
   }, [])
 
+  // open: tile → disc, then it turns if playing; close: coast home, then disc → tile
   React.useEffect(() => {
-    spinTo.current(playing)
+    if (open) {
+      disc(1)
+      drive.current(playing ? "spin" : "coast")
+    } else drive.current("home", () => disc(0))
+  }, [open, playing, disc])
+
+  React.useEffect(() => {
     if (!playing) {
       liquid.current?.energy(1)
       return
@@ -530,9 +492,14 @@ function Deck({ size, children }: { size: WidgetSize; children: React.ReactNode 
     return () => window.clearInterval(t)
   }, [playing])
 
+  const a = ART[size]
   return (
     <DeckCtx.Provider value={liquid}>
-      <div ref={ref} className="mu-deck" style={{ "--spin": 0, ...artVars(GEO[size]) } as React.CSSProperties}>
+      <div
+        ref={ref}
+        className="mu-deck"
+        style={{ "--spin": 0, "--disc": 0, "--ax": a.x + "px", "--ay": a.y + "px", "--as": a.s + "px", "--ar": a.r + "px" } as React.CSSProperties}
+      >
         {children}
       </div>
     </DeckCtx.Provider>
@@ -548,36 +515,58 @@ function Liquid({ cells, seed }: { cells?: number; seed: number }) {
 }
 
 // ---------------------------------------------------------------------------
-// The art tile, and the record that hides behind it
+// The art, which is also the record
 
-function MainArt({ chip }: { chip: boolean }) {
-  const index = useIndex()
+/** Progress as an arc around the disc, written by ref. */
+function Arc({ size }: { size: number }) {
+  const ref = React.useRef<SVGCircleElement>(null)
+  const write = React.useCallback((p: Player) => {
+    ref.current?.setAttribute("stroke-dashoffset", (1 - p.position / TRACKS[p.index].duration).toFixed(4))
+  }, [])
+  usePlayerDOM(write)
+  const r = size / 2 + 5
+  const box = size + 14
   return (
-    <div className="mu-art">
-      <Art key={index} track={TRACKS[index]} className="mu-art-img">
-        <span className="mu-art-sheen" />
-        {chip ? (
+    <svg className="mu-arc" width={box} height={box} viewBox={`0 0 ${box} ${box}`} aria-hidden="true">
+      <circle className="mu-arc-track" cx={box / 2} cy={box / 2} r={r} />
+      <circle
+        ref={ref}
+        className="mu-arc-fill"
+        cx={box / 2}
+        cy={box / 2}
+        r={r}
+        pathLength={1}
+        strokeDasharray="1 1"
+        strokeDashoffset={(1 - INITIAL.position / TRACKS[INITIAL.index].duration).toFixed(4)}
+        transform={`rotate(-90 ${box / 2} ${box / 2})`}
+      />
+    </svg>
+  )
+}
+
+function AlbumRecord({ size }: { size: WidgetSize }) {
+  const index = useIndex()
+  const t = TRACKS[index]
+  return (
+    <div className={"mu-art mu-art-" + size}>
+      {size !== "small" ? <Arc size={ART[size].s} /> : null}
+      <div className="mu-lift">
+        <div className="mu-disc">
+          <div className="mu-disc-spin">
+            <div className="mu-vinyl" style={{ "--vinyl": vinylOf(t) } as React.CSSProperties} />
+            <Art key={index} track={t} className="mu-face" />
+            <div className="mu-grooves" />
+          </div>
+          <div className="mu-groove-light" />
+          <div className="mu-sweep" />
+          <span className="mu-spindle" />
+        </div>
+        {size !== "small" ? (
           <span className="mu-chip">
             <Equalizer className="mu-eq-chip" />
           </span>
         ) : null}
-      </Art>
-    </div>
-  )
-}
-
-function Record({ size }: { size: WidgetSize }) {
-  const index = useIndex()
-  const t = TRACKS[index]
-  const r = GEO[size].record
-  return (
-    <div className="mu-record" aria-hidden="true" style={{ left: r.x + "px", top: r.y + "px", width: r.s + "px", height: r.s + "px" }}>
-      <div className="mu-spin">
-        <div className="mu-vinyl" style={{ "--vinyl": vinylOf(t) } as React.CSSProperties} />
-        <Art key={index} track={t} className="mu-label" />
       </div>
-      <div className="mu-sheen" />
-      <span className="mu-spindle" />
     </div>
   )
 }
@@ -585,14 +574,14 @@ function Record({ size }: { size: WidgetSize }) {
 // ---------------------------------------------------------------------------
 // Progress and times, written by ref
 
-function ProgressLine({ className }: { className?: string }) {
+function ProgressLine() {
   const fill = React.useRef<HTMLSpanElement>(null)
   const write = React.useCallback((p: Player) => {
     if (fill.current) fill.current.style.transform = `scaleX(${(p.position / TRACKS[p.index].duration).toFixed(4)})`
   }, [])
   usePlayerDOM(write)
   return (
-    <span aria-hidden="true" className={"mu-line" + (className ? " " + className : "")}>
+    <span aria-hidden="true" className="mu-line">
       <span ref={fill} className="mu-line-fill" style={{ transform: `scaleX(${(INITIAL.position / TRACKS[INITIAL.index].duration).toFixed(4)})` }} />
     </span>
   )
@@ -601,7 +590,7 @@ function ProgressLine({ className }: { className?: string }) {
 type TimeKind = "elapsed" | "remaining"
 const timeText = (p: Player, kind: TimeKind) => (kind === "elapsed" ? fmt(p.position) : "-" + fmt(TRACKS[p.index].duration - p.position))
 
-function Time({ kind, className }: { kind: TimeKind; className?: string }) {
+function Time({ kind }: { kind: TimeKind }) {
   const ref = React.useRef<HTMLSpanElement>(null)
   const write = React.useCallback(
     (p: Player) => {
@@ -612,25 +601,28 @@ function Time({ kind, className }: { kind: TimeKind; className?: string }) {
   )
   usePlayerDOM(write)
   return (
-    <span ref={ref} className={"go-mono" + (className ? " " + className : "")}>
+    <span ref={ref} className="go-mono">
       {timeText(INITIAL, kind)}
     </span>
   )
 }
 
-function Times({ className }: { className?: string }) {
+function Progress() {
   return (
-    <span className={"mu-times" + (className ? " " + className : "")}>
-      <Time kind="elapsed" />
-      <Time kind="remaining" />
-    </span>
+    <div className="mu-progress">
+      <ProgressLine />
+      <span className="mu-times">
+        <Time kind="elapsed" />
+        <Time kind="remaining" />
+      </span>
+    </div>
   )
 }
 
 // ---------------------------------------------------------------------------
 // Transport: round glass buttons with a press spring
 
-function MuButton({ label, className, hidden, onPress, children }: { label: string; className?: string; hidden?: boolean; onPress: () => void; children: React.ReactNode }) {
+function MuButton({ label, className, onPress, children }: { label: string; className?: string; onPress: () => void; children: React.ReactNode }) {
   const ref = React.useRef<HTMLButtonElement>(null)
   const press = useSpringVar(ref, "--mu-b", 0, 520, 24)
   return (
@@ -638,8 +630,6 @@ function MuButton({ label, className, hidden, onPress, children }: { label: stri
       ref={ref}
       type="button"
       aria-label={label}
-      tabIndex={hidden ? -1 : 0}
-      aria-hidden={hidden || undefined}
       className={"mu-btn go-live" + (className ? " " + className : "")}
       onPointerDown={(e) => {
         e.stopPropagation()
@@ -661,23 +651,20 @@ function MuButton({ label, className, hidden, onPress, children }: { label: stri
   )
 }
 
-/** `rest` buttons live on the pane and go dead when it folds away; `open` ones live on the open face. */
-function Transport({ size, prev = true, face = "rest", className }: { size: "sm" | "md" | "lg"; prev?: boolean; face?: "rest" | "open"; className?: string }) {
+function Transport({ size, prev = true, className }: { size: "sm" | "md" | "lg"; prev?: boolean; className?: string }) {
   const playing = usePlaying()
-  const { open } = useGlass()
-  const hidden = face === "rest" ? open : !open
   const icon = size === "lg" ? 15 : size === "md" ? 13 : 11
   return (
     <div className={"mu-transport mu-transport-" + size + (className ? " " + className : "")}>
       {prev ? (
-        <MuButton label="Previous track" hidden={hidden} onPress={store.prev}>
+        <MuButton label="Previous track" onPress={store.prev}>
           <SkipBack size={icon} fill="currentColor" strokeWidth={1.4} />
         </MuButton>
       ) : null}
-      <MuButton label={playing ? "Pause" : "Play"} hidden={hidden} className="mu-play" onPress={store.toggle}>
+      <MuButton label={playing ? "Pause" : "Play"} className="mu-play" onPress={store.toggle}>
         {playing ? <Pause size={icon + 1} fill="currentColor" strokeWidth={0} /> : <Play size={icon + 1} fill="currentColor" strokeWidth={0} className="mu-play-icon" />}
       </MuButton>
-      <MuButton label="Next track" hidden={hidden} onPress={store.next}>
+      <MuButton label="Next track" onPress={store.next}>
         <SkipForward size={icon} fill="currentColor" strokeWidth={1.4} />
       </MuButton>
     </div>
@@ -698,7 +685,6 @@ function NowText({ className, album = false }: { className?: string; album?: boo
   )
 }
 
-/** Up Next printed on the pane (large, at rest). */
 function UpNextList({ count }: { count: number }) {
   const index = useIndex()
   return (
@@ -719,69 +705,22 @@ function UpNextList({ count }: { count: number }) {
 }
 
 // ---------------------------------------------------------------------------
-// The queue: the next tracks as sheets that rise and fan into a stack when open
+// Sizes. The pane is flat and stays put: everything happens in the art.
 
-function Queue({ count }: { count: number }) {
-  const { open } = useGlass()
-  const index = useIndex()
-  const tracks = upNext(index, count)
-  return (
-    <>
-      {tracks.map((t, i) => (
-        <GlassSheet key={i} className="mu-row" style={{ "--i": i, "--d": (i * 0.1).toFixed(2) } as React.CSSProperties}>
-          <button
-            type="button"
-            tabIndex={open ? 0 : -1}
-            aria-hidden={!open}
-            aria-label={`Play ${t.title} by ${t.artist}`}
-            className="mu-row-btn go-live"
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation()
-              store.play(TRACKS.indexOf(t))
-            }}
-            onDoubleClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") e.stopPropagation()
-            }}
-          >
-            <Art track={t} className="mu-row-art" />
-            <span className="mu-row-text">
-              <span className="mu-row-title">{t.title}</span>
-              <span className="mu-row-artist">{t.artist}</span>
-            </span>
-            <span className="mu-row-dur go-mono">{fmt(t.duration)}</span>
-          </button>
-        </GlassSheet>
-      ))}
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Sizes
-
-const PANE = { hinge: "bottom", lean: -9, openLean: -70, openShift: 14, openFade: 0.8, radius: 22 } as const
+const PANE = { hinge: "none", lean: 0, openLean: 0, openShift: 0, openFade: 0, radius: 22 } as const
 
 /** Small: the art edge to edge under a thin frost, white type, two round buttons. */
 function Small() {
   return (
     <Deck size="small">
       <Liquid seed={3} />
-      <Record size="small" />
-      <MainArt chip={false} />
+      <AlbumRecord size="small" />
       <GlassPane {...PANE} frost={0.15} className="mu-pane mu-pane-s">
         <Music size={13} strokeWidth={2.2} className="mu-glyph" aria-hidden="true" />
         <Equalizer className="mu-eq-corner" />
         <NowText className="mu-now-s" />
-        <Transport size="sm" prev={false} className="mu-transport-rest" />
+        <Transport size="sm" prev={false} className="mu-transport-s" />
       </GlassPane>
-      <Queue count={3} />
-      <div className="mu-face">
-        <Transport size="sm" prev={false} face="open" />
-        <Time kind="elapsed" className="mu-face-el" />
-      </div>
-      <Scrubber className="mu-scrub-s" />
     </Deck>
   )
 }
@@ -790,25 +729,15 @@ function Small() {
 function Medium() {
   return (
     <Deck size="medium">
-      <Liquid seed={6} cells={80} />
-      <GlassPane {...PANE} frost={0.9} className="mu-pane mu-pane-m">
+      <Liquid seed={6} cells={120} />
+      <GlassPane {...PANE} frost={0.9} className="mu-pane">
         <div className="mu-col">
           <NowText album className="mu-now-m" />
-          <div className="mu-progress">
-            <ProgressLine />
-            <Times />
-          </div>
-          <Transport size="md" className="mu-transport-rest" />
+          <Progress />
+          <Transport size="md" />
         </div>
       </GlassPane>
-      <Record size="medium" />
-      <MainArt chip />
-      <Queue count={3} />
-      <div className="mu-face">
-        <NowText className="mu-now-face" />
-        <Scrubber />
-        <Times />
-      </div>
+      <AlbumRecord size="medium" />
     </Deck>
   )
 }
@@ -817,30 +746,17 @@ function Medium() {
 function Large() {
   return (
     <Deck size="large">
-      <Liquid seed={9} cells={80} />
-      <GlassPane {...PANE} frost={0.9} className="mu-pane mu-pane-l">
+      <Liquid seed={9} cells={120} />
+      <GlassPane {...PANE} frost={0.9} className="mu-pane">
         <Music size={14} strokeWidth={2.2} className="mu-glyph mu-glyph-ink" aria-hidden="true" />
         <NowText album className="mu-now-l" />
         <div className="mu-strip">
-          <div className="mu-progress">
-            <ProgressLine />
-            <Times />
-          </div>
-          <Transport size="lg" className="mu-transport-rest" />
+          <Progress />
+          <Transport size="lg" />
         </div>
         <UpNextList count={3} />
       </GlassPane>
-      <Record size="large" />
-      <MainArt chip />
-      <Queue count={TRACKS.length - 1} />
-      <div className="mu-face">
-        <NowText className="mu-now-face" />
-        <Scrubber />
-        <Times />
-      </div>
-      <div className="mu-face mu-face-bottom">
-        <Transport size="lg" face="open" />
-      </div>
+      <AlbumRecord size="large" />
     </Deck>
   )
 }
@@ -855,6 +771,7 @@ export function MusicWidget({ size = "small", className, appearDelay = 0 }: { si
       tone={tone}
       label="Music"
       radius={24}
+      tilt={2}
       appearDelay={appearDelay}
       className={"mu-root mu-" + size + (className ? " " + className : "")}
       onActivate={() => open("music", { singleton: "app", title: "Music", w: 640, h: 420 })}
@@ -873,65 +790,88 @@ const MU_CSS = `
 .mu-deck { position: absolute; inset: 0; border-radius: 24px; }
 .mu-root .go-liquid { border-radius: 24px; }
 
-/* ---- art ---- */
+/* ---- the art, which is also the record ---- */
 .mu-art-tile { position: relative; overflow: hidden; }
 .mu-art-tile > canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: 0; }
-.mu-art {
-  position: absolute; left: var(--ax); top: var(--ay); width: var(--as); height: var(--as);
-  transform-origin: 50% 50%;
+.mu-art { position: absolute; left: var(--ax); top: var(--ay); width: var(--as); height: var(--as); }
+/* hover: the tile lifts 3px and tilts gently toward the pointer, on its own */
+.mu-lift {
+  position: absolute; inset: 0;
   transform:
-    translate(calc(var(--go-open) * var(--adx)), calc(var(--go-open) * var(--ady) - var(--go-hover) * (1 - var(--go-open)) * 4px))
-    perspective(520px)
-    rotateX(calc(var(--go-py) * var(--go-hover) * var(--atilt, -8deg)))
-    rotateY(calc(var(--go-px) * var(--go-hover) * var(--atilt-y, 10deg)))
-    scale(calc(1 + var(--go-hover) * (1 - var(--go-open)) * .03 - var(--go-open) * var(--ads) - var(--go-press) * .015));
+    translateY(calc(var(--go-hover) * -3px))
+    perspective(600px)
+    rotateX(calc(var(--go-py) * var(--go-hover) * -4deg))
+    rotateY(calc(var(--go-px) * var(--go-hover) * 5deg))
+    scale(calc(1 - var(--go-press) * .015));
 }
-.mu-art-img {
-  position: absolute; inset: 0; border-radius: var(--ar);
-  box-shadow: 0 0 0 .5px rgba(0,0,0,.14), 0 calc(7px + var(--go-hover) * 7px) calc(16px + var(--go-hover) * 12px) -7px rgba(16,18,24,.5);
+/* the clip: a tile whose corners spring to a circle */
+.mu-disc {
+  position: absolute; inset: 0; overflow: hidden;
+  border-radius: calc(var(--ar) + var(--disc) * (50% - var(--ar)));
+  box-shadow:
+    0 0 0 .5px rgba(0,0,0,.14),
+    0 calc(5px + var(--go-hover) * 6px) calc(12px + var(--go-hover) * 14px) calc(-6px + var(--go-hover) * 1px) rgba(16,18,24,calc(.45 + var(--go-hover) * .1));
 }
-.mu-root[data-tone="dark"] .mu-art-img { box-shadow: 0 0 0 .5px rgba(255,255,255,.14), 0 calc(8px + var(--go-hover) * 7px) calc(18px + var(--go-hover) * 12px) -6px rgba(0,0,0,.75); }
-.mu-art-sheen {
-  position: absolute; inset: 0; border-radius: inherit;
-  background: radial-gradient(110% 80% at calc(25% + var(--go-px) * 35%) calc(-5% + var(--go-py) * 30%), rgba(255,255,255,calc(.16 + var(--go-hover) * .16)), rgba(255,255,255,0) 58%);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.3), inset 0 0 0 .5px rgba(255,255,255,.16);
-}
-
-/* ---- the record behind the art ---- */
-.mu-record {
-  position: absolute; border-radius: 50%;
-  opacity: min(1, calc(var(--go-open) * 1.6));
-  transform: translateX(calc((1 - var(--go-open)) * -28px)) rotate(calc((1 - var(--go-open)) * -40deg));
-  box-shadow: 0 2px 6px -1px rgba(0,0,0,.35);
-}
-.mu-spin { position: absolute; inset: 0; border-radius: 50%; transform: rotate(calc(var(--spin) * 1deg)); }
+.mu-root[data-tone="dark"] .mu-disc { box-shadow: 0 0 0 .5px rgba(255,255,255,.14), 0 calc(6px + var(--go-hover) * 6px) calc(14px + var(--go-hover) * 14px) -6px rgba(0,0,0,.75); }
+.mu-disc-spin { position: absolute; inset: 0; border-radius: inherit; transform: rotate(calc(var(--spin) * 1deg)); }
 .mu-vinyl {
-  position: absolute; inset: 0; border-radius: 50%;
+  position: absolute; inset: 0; border-radius: inherit;
+  opacity: min(1, calc(var(--disc) * 2));
   background:
     conic-gradient(from 10deg, rgba(255,255,255,.14), rgba(255,255,255,0) 22%, rgba(0,0,0,.08) 40%, rgba(255,255,255,.1) 58%, rgba(255,255,255,0) 76%, rgba(0,0,0,.06) 90%, rgba(255,255,255,.14)),
-    repeating-radial-gradient(circle, transparent 0 1px, rgba(0,0,0,.08) 1px 1.6px),
     var(--vinyl);
-  box-shadow: inset 0 0 0 .5px rgba(0,0,0,.3), inset 0 0 0 1.5px rgba(255,255,255,.16);
 }
-.mu-label {
-  position: absolute; left: 50%; top: 50%; width: 37%; height: 37%; translate: -50% -50%; border-radius: 50%;
-  box-shadow: 0 0 0 .5px rgba(0,0,0,.25);
+/* the art shrinks to the label; its own corners round with the disc */
+.mu-face {
+  position: absolute; inset: 0;
+  border-radius: calc(var(--ar) + var(--disc) * (50% - var(--ar)));
+  transform: scale(calc(1 - var(--disc) * .63));
 }
-.mu-sheen {
-  position: absolute; inset: 0; border-radius: 50%;
+.mu-grooves {
+  position: absolute; inset: 0; border-radius: inherit;
+  opacity: var(--disc);
+  background: repeating-radial-gradient(circle, transparent 0 1px, rgba(0,0,0,.09) 1px 1.6px);
+  -webkit-mask: radial-gradient(circle closest-side, transparent 37%, #000 39%);
+  mask: radial-gradient(circle closest-side, transparent 37%, #000 39%);
+  box-shadow: inset 0 0 0 1.5px rgba(255,255,255,calc(var(--disc) * .16));
+}
+/* light that stays with the room while the disc turns under it */
+.mu-groove-light {
+  position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  opacity: calc(var(--disc) * .9);
   background: conic-gradient(from calc(var(--go-px) * 40deg + 30deg),
-    rgba(255,255,255,0) 0deg, rgba(255,255,255,.6) 14deg, rgba(255,255,255,0) 34deg,
-    rgba(255,255,255,0) 180deg, rgba(255,255,255,.45) 194deg, rgba(255,255,255,0) 214deg, rgba(255,255,255,0) 360deg);
+    rgba(255,255,255,0) 0deg, rgba(255,255,255,.55) 14deg, rgba(255,255,255,0) 34deg,
+    rgba(255,255,255,0) 180deg, rgba(255,255,255,.4) 194deg, rgba(255,255,255,0) 214deg, rgba(255,255,255,0) 360deg);
   -webkit-mask: radial-gradient(circle closest-side, transparent 38%, #000 42%, #000 97%, transparent 100%);
   mask: radial-gradient(circle closest-side, transparent 38%, #000 42%, #000 97%, transparent 100%);
   mix-blend-mode: soft-light;
 }
-.mu-root[data-tone="dark"] .mu-sheen { mix-blend-mode: screen; opacity: .35; }
-.mu-spindle {
-  position: absolute; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px; border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #fff, #b6b8be 55%, #6d6f76);
-  box-shadow: 0 0 0 .75px rgba(0,0,0,.3);
+.mu-root[data-tone="dark"] .mu-groove-light { mix-blend-mode: screen; opacity: calc(var(--disc) * .35); }
+/* hover: a light sweep crosses the art with the pointer */
+.mu-sweep {
+  position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(105deg, rgba(255,255,255,0) 38%, rgba(255,255,255,.34) 50%, rgba(255,255,255,0) 62%) no-repeat;
+  background-size: 260% 100%;
+  background-position: calc(50% - var(--go-px) * 60%) 0;
+  opacity: calc(var(--go-hover) * (1 - var(--disc) * .6));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.3), inset 0 0 0 .5px rgba(255,255,255,.16);
 }
+.mu-spindle {
+  position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff, #b6b8be 55%, #6d6f76);
+  box-shadow: 0 0 0 .75px rgba(0,0,0,.3), 0 1px 2px rgba(0,0,0,.4);
+  opacity: var(--disc);
+  transform: scale(calc(.4 + var(--disc) * .6));
+}
+/* progress as an arc around the disc */
+.mu-arc {
+  position: absolute; left: -7px; top: -7px; overflow: visible;
+  opacity: var(--disc);
+  transform: translateY(calc(var(--go-hover) * -3px));
+}
+.mu-arc circle { fill: none; stroke-width: 2.5; stroke-linecap: round; }
+.mu-arc-track { stroke: var(--go-ink-faint); }
+.mu-arc-fill { stroke: var(--go-ink); opacity: .6; }
 
 /* ---- equaliser ---- */
 .mu-eq { display: flex; align-items: flex-end; }
@@ -941,14 +881,13 @@ const MU_CSS = `
   position: absolute; right: 7px; top: 7px; display: flex; padding: 4px 5px; border-radius: 7px;
   background: rgba(10,10,14,.3); -webkit-backdrop-filter: blur(8px) saturate(1.4); backdrop-filter: blur(8px) saturate(1.4);
   box-shadow: inset 0 0 0 .5px rgba(255,255,255,.22);
-  opacity: calc(.75 + var(--go-hover) * .25);
+  opacity: calc((.75 + var(--go-hover) * .25) * (1 - var(--disc)));
 }
 .mu-eq-chip { height: 11px; gap: 2px; color: #fff; }
 .mu-eq-chip .mu-bar { width: 2.5px; border-radius: 1.25px; }
 
 /* ---- the pane ---- */
 .mu-pane .go-pane-body { overflow: hidden; }
-.mu-root[data-open] .mu-pane .go-live { pointer-events: none; }
 .mu-glyph { position: absolute; left: 13px; top: 13px; color: #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
 .mu-glyph-ink { left: auto; right: 18px; top: 18px; color: #fa2d48; filter: none; }
 
@@ -960,9 +899,9 @@ const MU_CSS = `
 .mu-album { font-size: 11px; line-height: 1.3; color: var(--go-ink-soft); opacity: .8; }
 .mu-kicker { font-size: 10px; font-weight: 600; letter-spacing: .02em; color: var(--go-ink-soft); }
 
-/* progress */
+/* progress: the bar hands over to the arc when the art is a record */
 .mu-progress { display: flex; flex-direction: column; gap: 3px; }
-.mu-line { position: relative; display: block; height: 3px; border-radius: 2px; overflow: hidden; background: var(--go-ink-faint); }
+.mu-line { position: relative; display: block; height: 3px; border-radius: 2px; overflow: hidden; background: var(--go-ink-faint); opacity: calc(1 - var(--disc)); }
 .mu-line-fill { position: absolute; inset: 0; display: block; background: var(--go-ink); opacity: .6; transform-origin: 0 50%; }
 .mu-times { display: flex; justify-content: space-between; font-size: 10px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; }
 
@@ -981,58 +920,15 @@ const MU_CSS = `
 .mu-play-icon { translate: 1px 0; }
 .mu-transport-sm { gap: 6px; }
 .mu-transport-md { gap: 12px; }
-.mu-transport-md .mu-btn { width: 28px; height: 28px; }
 .mu-transport-md .mu-play { width: 34px; height: 34px; }
 .mu-transport-lg { gap: 16px; }
 .mu-transport-lg .mu-btn { width: 32px; height: 32px; }
 .mu-transport-lg .mu-play { width: 40px; height: 40px; }
 
-/* ---- the queue: sheets that rise and fan into a stack ---- */
-.mu-row {
-  --p: max(0, (var(--go-open) - var(--d)) / (1 - var(--d)));
-  left: var(--qx); top: calc(var(--qy) + var(--i) * var(--qstep)); width: var(--qw); height: var(--qh);
-  border-radius: var(--qr, 10px);
-  opacity: min(1, calc(var(--p) * 3));
-  transform-origin: 50% 0%;
-  transform:
-    translate(calc((1 - var(--p)) * var(--rx)), calc((1 - var(--p)) * (var(--ry) - var(--i) * var(--rystep))))
-    rotate(calc((1 - var(--p)) * (var(--i) - 1) * var(--rrot, 2deg)))
-    scale(calc(1 - (1 - var(--p)) * var(--rs)));
-}
-.mu-root:not([data-open]) .mu-row-btn { pointer-events: none; }
-.mu-row-btn {
-  all: unset; box-sizing: border-box; position: absolute; inset: 0; display: flex; align-items: center; gap: var(--rgap, 7px);
-  padding: 0 9px 0 4px; cursor: pointer; color: #141416; border-radius: inherit;
-}
-.mu-root[data-tone="dark"] .mu-row-btn { color: #f5f5f7; }
-.mu-row-btn:focus-visible { outline: 2px solid #4c8dff; outline-offset: -2px; }
-.mu-row-art { flex: none; width: var(--ra); height: var(--ra); border-radius: 4px; box-shadow: 0 0 0 .5px rgba(0,0,0,.12); }
-.mu-row-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.mu-row-title, .mu-row-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
-.mu-row-title { font-size: var(--rt, 10.5px); font-weight: 600; letter-spacing: -.005em; }
-.mu-row-artist { font-size: var(--rta, 9px); opacity: .55; }
-.mu-row-dur { flex: none; font-size: 9.5px; opacity: .5; font-variant-numeric: tabular-nums; }
-
-/* ---- the open face ---- */
-.mu-face { position: absolute; opacity: var(--go-open); transform: translateY(calc((1 - var(--go-open)) * 8px)); }
-.mu-root:not([data-open]) .mu-face, .mu-root:not([data-open]) .mu-scrub { pointer-events: none; }
-.mu-scrub { position: relative; height: 14px; cursor: pointer; touch-action: none; opacity: var(--go-open); }
-.mu-scrub:focus-visible { outline: 2px solid #4c8dff; outline-offset: 2px; border-radius: 4px; }
-.mu-scrub-track { position: absolute; left: 0; right: 0; top: 5px; height: 4px; border-radius: 2px; overflow: hidden; background: var(--go-ink-faint); }
-.mu-scrub-fill { position: absolute; inset: 0; display: block; background: var(--go-ink); opacity: .75; transform-origin: 0 50%; transform: scaleX(0); }
-.mu-scrub-rail { position: absolute; inset: 0; display: block; pointer-events: none; }
-.mu-scrub-knob {
-  position: absolute; left: -5px; top: 2px; width: 10px; height: 10px; border-radius: 50%;
-  background: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.18), 0 2px 5px rgba(0,0,0,.25);
-  transform: scale(calc(.75 + var(--go-hover) * .25));
-}
-.mu-now-face .mu-title { font-size: 12px; }
-.mu-now-face .mu-artist { font-size: 10.5px; }
-
 /* ---- small ---- */
-.mu-small { --atilt: -3deg; --atilt-y: 4deg; }
-.mu-small .mu-art-img { box-shadow: none; }
-.mu-small .mu-art-img .mu-art-sheen { box-shadow: none; }
+.mu-art-small { overflow: hidden; border-radius: 24px; }
+.mu-art-small .mu-disc { box-shadow: none; }
+.mu-art-small .mu-lift { transform: perspective(600px) rotateX(calc(var(--go-py) * var(--go-hover) * -2deg)) rotateY(calc(var(--go-px) * var(--go-hover) * 2.5deg)) scale(calc(1 + var(--go-hover) * .02 - var(--go-press) * .015)); }
 .mu-root.mu-small .mu-pane-s .go-pane-tint {
   background: linear-gradient(180deg, rgba(0,0,0,.2) 0%, rgba(0,0,0,0) 26%, rgba(0,0,0,0) 46%, rgba(0,0,0,.6) 100%);
 }
@@ -1042,23 +938,15 @@ const MU_CSS = `
 .mu-now-s .mu-artist { color: rgba(255,255,255,.75); font-size: 11px; }
 .mu-eq-corner { position: absolute; right: 14px; top: 13px; height: 12px; gap: 2px; color: #fff; opacity: calc(.8 + var(--go-hover) * .2); filter: drop-shadow(0 1px 2px rgba(0,0,0,.3)); }
 .mu-eq-corner .mu-bar { width: 2.5px; border-radius: 1.25px; }
-.mu-small .mu-transport-rest { position: absolute; right: 11px; bottom: 13px; }
-.mu-small .mu-transport-rest .mu-btn { color: #fff; background: rgba(255,255,255,.2); }
-.mu-small .mu-transport-rest .mu-play { background: rgba(255,255,255,.3); }
-.mu-small .mu-face { left: 104px; right: 12px; top: 18px; display: flex; flex-direction: column; align-items: center; gap: 5px; }
-.mu-face-el { font-size: 10px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; }
-.mu-scrub-s { position: absolute; left: 12px; right: 12px; top: 73px; }
-.mu-small .mu-row { --qx: 10px; --qy: 94px; --qstep: 24px; --qw: 150px; --qh: 22px; --qr: 8px; --rx: 0px; --ry: 40px; --rystep: 22px; --ra: 16px; --rgap: 6px; --rt: 10.5px; --rta: 9px; --rs: calc(.12 - var(--i) * .04); }
-.mu-small .mu-row-artist { display: none; }
+.mu-transport-s { position: absolute; right: 11px; bottom: 13px; }
+.mu-transport-s .mu-btn { color: #fff; background: rgba(255,255,255,.2); }
+.mu-transport-s .mu-play { background: rgba(255,255,255,.3); }
 
 /* ---- medium ---- */
-.mu-medium .mu-row { --qx: 158px; --qy: 16px; --qstep: 48px; --qw: 192px; --qh: 42px; --qr: 12px; --rx: 12px; --ry: 30px; --rystep: 24px; --rs: .05; --rrot: 1.5deg; --ra: 30px; --rgap: 9px; --rt: 11.5px; --rta: 10px; }
-.mu-medium .mu-row-btn { padding: 0 12px 0 6px; }
 .mu-col { position: absolute; left: 166px; right: 20px; top: 22px; bottom: 16px; display: flex; flex-direction: column; }
 .mu-now-m .mu-title { font-size: 14px; }
 .mu-col .mu-progress { margin-top: auto; }
 .mu-col .mu-transport { align-self: center; margin-top: 8px; }
-.mu-medium .mu-face { left: 16px; width: 126px; top: 88px; display: flex; flex-direction: column; gap: 2px; }
 
 /* ---- large ---- */
 .mu-now-l { position: absolute; left: 184px; right: 18px; top: 26px; }
@@ -1073,8 +961,4 @@ const MU_CSS = `
 .mu-upnext-title { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mu-upnext-artist { font-size: 10.5px; color: var(--go-ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mu-upnext-dur { flex: none; font-size: 10px; color: var(--go-ink-soft); }
-.mu-large .mu-face { left: 126px; right: 20px; top: 24px; display: flex; flex-direction: column; gap: 3px; }
-.mu-large .mu-face.mu-face-bottom { left: 0; right: 0; top: auto; bottom: 16px; align-items: center; }
-.mu-large .mu-row { --qx: 16px; --qy: 102px; --qstep: 40px; --qw: 332px; --qh: 35px; --qr: 11px; --rx: 0px; --ry: 120px; --rystep: 36px; --rs: calc(.1 - var(--i) * .015); --rrot: 1deg; --ra: 26px; --rgap: 9px; --rt: 12px; --rta: 10.5px; }
-.mu-large .mu-row-btn { padding: 0 12px 0 5px; }
 `
