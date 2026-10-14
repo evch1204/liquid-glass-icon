@@ -3,7 +3,7 @@
 import * as React from "react"
 import { APPS, DOCK_ORDER } from "@/lib/apps"
 import { LIQUIDS, LiquidCanvas, useSpringVar } from "@/components/ui/glass-object"
-import { DOCK_ICONS } from "./dock-icons"
+import { DOCK_ICONS, TrashIcon } from "./dock-icons"
 import { useWindowManager, type AppId } from "./window-manager"
 
 /**
@@ -160,7 +160,7 @@ export function Dock() {
         onPointerEnter={() => setTrayLift(1)}
         onPointerLeave={() => setTrayLift(0)}
       >
-        <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.milk} seed={9} cells={120} fps={24} className="dock-liquid" />
+        <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.milk} seed={9} cells={72} fps={12} className="dock-liquid" />
         <span className="dock-tray-glass" aria-hidden="true" />
         <span className="dock-tray-rim" aria-hidden="true" />
         {DOCK_ORDER.map((id, i) => (
@@ -175,6 +175,14 @@ export function Dock() {
             />
           </React.Fragment>
         ))}
+        <span aria-hidden="true" className="dock-sep" />
+        <button type="button" data-dock-tile aria-label="Trash" className="dock-tile" onClick={(e) => e.currentTarget.blur()}>
+          <span className="dock-face" aria-hidden="true">
+            <TrashIcon />
+          </span>
+          <span className="dock-chip" aria-hidden="true">Trash</span>
+          <span className="dock-dot" aria-hidden="true" />
+        </button>
       </nav>
     </div>
   )
@@ -242,8 +250,7 @@ const DOCK_CSS = `
   border-radius: 9px;
   font-size: 11.5px; font-weight: 500; white-space: nowrap;
   color: var(--dock-ink);
-  background: rgba(var(--dock-glass), .8);
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  background: rgba(var(--dock-glass), .94);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.8), 0 0 0 .5px rgba(0,0,0,.12), 0 10px 20px -10px rgba(0,0,0,.4);
   opacity: var(--tile-lift);
   transform: translateY(calc((1 - var(--tile-lift)) * 8px)) scale(calc(.9 + var(--tile-lift) * .1));
