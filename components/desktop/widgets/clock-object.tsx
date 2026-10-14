@@ -1,43 +1,45 @@
 "use client"
 
 import * as React from "react"
-import { GlassObject, GlassPane, GlassSheet, LIQUIDS, LiquidCanvas, useGlass, useSpringVar } from "@/components/ui/glass-object"
+import { GlassObject, GlassPane, LIQUIDS, LiquidCanvas, useGlass, useSpringVar } from "@/components/ui/glass-object"
 import { WIDGET, type WidgetSize } from "../glass"
 import { APPS } from "@/lib/apps"
 import { useWindowManager } from "../window-manager"
 
 /**
  * Clock — at rest, the macOS Sonoma Clock widget: a frosted white card with
- * clean analog faces and their captions. Handled, it is an object.
+ * clean analog faces and their captions. Its motion happens inside the card,
+ * in the clock itself; the card never changes size or shape and nothing
+ * leaves it.
  *
- * Back to front: a pearl liquid light, one frosted `GlassPane` covering the
- * whole widget that carries the captions (city, offset, digital time), and
- * the faces, which sit on that pane but are their own layer.
- *
- * - **Rest**: the card. Second hands sweep.
- * - **Hover**: the pane leans back on its bottom hinge and the object lifts;
- *   each face rises 3px off the pane and its shadow spreads, the face nearest
- *   the pointer most. The first touch nudges the second hand's balance.
- * - **Open** (click): the pane hinges down and away like the folder's front,
- *   captions and all. The faces stay: on small the face comes forward and
- *   three city beads run out from the hub to the rim along their own hour
- *   hands, 60ms apart; on medium and large the faces lift in sequence. The
- *   digital times and offsets rise beneath as sheet chips.
+ * - **Rest**: second hands sweep.
+ * - **Hover**: the hour and minute hands lift off the dial — up a pixel, a
+ *   drop shadow growing under them — and a soft sheen crosses the dial glass
+ *   with the pointer. Nothing else moves.
+ * - **Click, small**: a world-time watch. Each click advances the ring
+ *   Cupertino → New York → London → Tokyo → Cupertino; the hands sweep to the
+ *   new city's time on springs (the minute hand the long way round), the dial
+ *   crossfades between day and night, and the caption slides over within its
+ *   own line. Four dots under it show where in the ring you are. Escape (or a
+ *   press elsewhere) returns home.
+ * - **Click, medium / large**: the face you click lifts 2px and the caption
+ *   under it turns into a seconds-precise time and that city's date for 4s.
  * - **Activate** (double-click, Enter): the Clock app.
  *
- * Every motion is a spring written as a CSS variable on the object's root
- * (`--face*`, `--bead-*`, `--fh-*`, `--sway`); hands are turned on rAF
- * straight on the DOM. Nothing re-renders per frame.
+ * Every motion is a spring integrated on rAF and written by ref or as a CSS
+ * variable; nothing re-renders per frame.
  */
 
 type City = { name: string; code: string; zone: string }
 const HOME: City = { name: "Cupertino", code: "CUP", zone: "America/Los_Angeles" }
-const WORLD: City[] = [
+const ALL: City[] = [
+  HOME,
   { name: "New York", code: "NYC", zone: "America/New_York" },
   { name: "London", code: "LON", zone: "Europe/London" },
   { name: "Tokyo", code: "TYO", zone: "Asia/Tokyo" },
 ]
-const ALL: City[] = [HOME, ...WORLD]
+
+const reduceMotion = () => typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
 
 // ---------------------------------------------------------------------------
 // Time
@@ -59,73 +61,117 @@ function zoneOffset(zone: string, at: number): number {
   return Math.round((asUtc - at) / 60000)
 }
 
-/** Where that city's own hour hand points, in degrees from twelve. */
-function hourAngle(zone: string, at: number): number {
-  const t = (at + zoneOffset(zone, at) * 60000) % 86400000
-  return ((t / 3600000) % 12) * 30
-}
-
-/** "Tomorrow, +16HRS" (or "+16HRS" short), relative to home, as the macOS widget writes it. */
-function offsetLabel(zone: string, at: number, short = false): string {
+/** "Tomorrow, +16HRS", relative to home, as the macOS widget writes it. */
+function offsetLabel(zone: string, at: number): string {
   const d = (zoneOffset(zone, at) - zoneOffset(HOME.zone, at)) / 60
   const hrs = (d >= 0 ? "+" : "") + (Number.isInteger(d) ? d : d.toFixed(1)) + "HRS"
-  if (short) return hrs
   const ymd = (z: string) => new Intl.DateTimeFormat("en-CA", { timeZone: z, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(at))
   const a = ymd(zone)
   const b = ymd(HOME.zone)
   return (a === b ? "Today" : a > b ? "Tomorrow" : "Yesterday") + ", " + hrs
 }
 
-function timeIn(zone: string, at: number): string {
-  return new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(new Date(at))
+/** Is it night (before 6 or after 18) in that zone? */
+function isNight(zone: string, at: number): boolean {
+  const h = Math.floor((((at + zoneOffset(zone, at) * 60000) % 86400000) + 86400000) % 86400000 / 3600000)
+  return h < 6 || h >= 18
+}
+
+/** A spring step for hand-rolled springs: mass 1, returns the new [x, v]. */
+function step(x: number, v: number, target: number, k: number, c: number, dt: number): [number, number] {
+  const a = -k * (x - target) - c * v
+  const nv = v + a * dt
+  return [x + nv * dt, nv]
 }
 
 // ---------------------------------------------------------------------------
-// Parts written by ref
+// The face
 
 /**
- * A face whose hands are turned by requestAnimationFrame straight on the DOM.
- * White by day, near-black by night, in that city's own time.
+ * An analog face. The hands are turned by requestAnimationFrame straight on
+ * the DOM. When `zone` changes the hands do not jump: each carries a sprung
+ * displacement from the true time that decays to zero, so they sweep there —
+ * hour k=40 c=11, minute k=60 c=12 with a full extra turn. `dir` 1 travels
+ * forward (round the world eastward), 0 the short way back. Day and night are
+ * a `--n` spring the dial's colours are mixed from.
  */
-function Face({ zone, size }: { zone: string; size: number }) {
+function Face({ zone, size, dir = 1 }: { zone: string; size: number; dir?: 0 | 1 }) {
   const h = React.useRef<SVGGElement>(null)
   const m = React.useRef<SVGGElement>(null)
   const s = React.useRef<SVGGElement>(null)
   const root = React.useRef<SVGSVGElement>(null)
+  const st = React.useRef({ zone: "", off: 0, dH: 0, vH: 0, dM: 0, vM: 0, n: 0, vn: 0, nT: 0, ready: false })
+
+  // a new city: carry the hands' current positions over as a displacement to spring away
+  React.useEffect(() => {
+    const p = st.current
+    const now = Date.now()
+    const off = zoneOffset(zone, now)
+    if (p.ready && p.zone !== zone) {
+      const dh = (off - p.off) / 60
+      if (dh !== 0) {
+        let travelH: number
+        let travelM: number
+        if (dir === 1) {
+          travelH = (((dh * 30) % 360) + 360) % 360
+          travelM = ((((dh * 360) % 360) + 360) % 360) + 360
+        } else {
+          travelH = ((((dh * 30) % 360) + 540) % 360) - 180
+          travelM = ((((dh * 360) % 360) + 540) % 360) - 180 + (travelH >= 0 ? 360 : -360)
+        }
+        p.dH -= travelH
+        p.dM -= travelM
+      }
+    }
+    p.zone = zone
+    p.off = off
+    p.nT = isNight(zone, now) ? 1 : 0
+    if (!p.ready) {
+      p.n = p.nT
+      p.ready = true
+    }
+  }, [zone, dir])
+
   React.useEffect(() => {
     let raf = 0
-    let off = zoneOffset(zone, Date.now())
+    let last = 0
     let lastOff = Date.now()
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-    const frame = () => {
+    const reduce = reduceMotion()
+    const p = st.current
+    const frame = (t: number) => {
+      const dt = last ? Math.min(0.05, (t - last) / 1000) : 0.016
+      last = t
       const now = Date.now()
       if (now - lastOff > 60000) {
-        off = zoneOffset(zone, now)
+        p.off = zoneOffset(p.zone, now)
+        p.nT = isNight(p.zone, now) ? 1 : 0
         lastOff = now
       }
-      const ms = (now + off * 60000) % 86400000
+      if (reduce) {
+        p.dH = p.dM = 0
+        p.n = p.nT
+      } else {
+        ;[p.dH, p.vH] = step(p.dH, p.vH, 0, 40, 11, dt)
+        ;[p.dM, p.vM] = step(p.dM, p.vM, 0, 60, 12, dt)
+        ;[p.n, p.vn] = step(p.n, p.vn, p.nT, 60, 14, dt)
+      }
+      const ms = (((now + p.off * 60000) % 86400000) + 86400000) % 86400000
       const sec = reduce ? Math.floor(ms / 1000) : ms / 1000
       const min = sec / 60
       const hr = min / 60
-      h.current?.setAttribute("transform", `rotate(${(hr % 12) * 30})`)
-      m.current?.setAttribute("transform", `rotate(${(min % 60) * 6})`)
-      s.current?.setAttribute("transform", `rotate(${(sec % 60) * 6})`)
-      const hour = Math.floor(hr) % 24
-      root.current?.setAttribute("data-night", hour < 6 || hour >= 18 ? "true" : "false")
+      h.current?.setAttribute("transform", `rotate(${((hr % 12) * 30 + p.dH).toFixed(3)})`)
+      m.current?.setAttribute("transform", `rotate(${((min % 60) * 6 + p.dM).toFixed(3)})`)
+      s.current?.setAttribute("transform", `rotate(${((sec % 60) * 6).toFixed(3)})`)
+      root.current?.style.setProperty("--n", Math.max(0, Math.min(1, p.n)).toFixed(4))
       raf = requestAnimationFrame(frame)
     }
     raf = requestAnimationFrame(frame)
     return () => cancelAnimationFrame(raf)
-  }, [zone])
+  }, [])
+
   const r = 50
   return (
-    <svg ref={root} viewBox="-51 -51 102 102" width={size} height={size} className="ck-face" aria-hidden="true">
-      <defs>
-        {/* user-space region: a hand is a vertical line, so its bounding box has no width */}
-        <filter id="ck-hand-shadow" filterUnits="userSpaceOnUse" x="-60" y="-60" width="120" height="120">
-          <feDropShadow dx="0" dy="1" stdDeviation=".9" floodOpacity="0.25" />
-        </filter>
-      </defs>
+    <svg ref={root} viewBox="-51 -51 102 102" width={size} height={size} className="ck-face" style={{ "--n": 0 } as React.CSSProperties} aria-hidden="true">
       <circle r={r} className="ck-dial" />
       {Array.from({ length: 60 }, (_, i) => (
         <line key={i} x1="0" y1={-r + 2.5} x2="0" y2={i % 5 ? -r + 4.6 : -r + 6.5} transform={`rotate(${i * 6})`} className={i % 5 ? "ck-tick" : "ck-tick ck-tick-h"} />
@@ -141,90 +187,114 @@ function Face({ zone, size }: { zone: string; size: number }) {
           </text>
         )
       })}
-      <g ref={h} filter="url(#ck-hand-shadow)">
-        <line x1="0" y1="5" x2="0" y2="-25" className="ck-hand ck-hour" />
-      </g>
-      <g ref={m} filter="url(#ck-hand-shadow)">
-        <line x1="0" y1="5" x2="0" y2="-40" className="ck-hand ck-minute" />
-      </g>
-      {/* the balance: a touch sets the second hand wobbling a degree or so */}
-      <g className="ck-balance">
-        <g ref={s}>
-          <line x1="0" y1="10" x2="0" y2="-43" className="ck-second" />
-          <circle r="2.4" className="ck-cap" />
-          <circle r=".9" className="ck-cap-dot" />
+      {/* hour and minute hands lift off the dial together on hover */}
+      <g className="ck-hands">
+        {/* gives the group a real bounding box, so the shadow has room even when both hands are vertical */}
+        <circle r="46" fill="none" />
+        <g ref={h}>
+          <line x1="0" y1="5" x2="0" y2="-25" className="ck-hand ck-hour" />
         </g>
+        <g ref={m}>
+          <line x1="0" y1="5" x2="0" y2="-40" className="ck-hand ck-minute" />
+        </g>
+      </g>
+      <g ref={s}>
+        <line x1="0" y1="10" x2="0" y2="-43" className="ck-second" />
+        <circle r="2.4" className="ck-cap" />
+        <circle r=".9" className="ck-cap-dot" />
       </g>
     </svg>
   )
 }
 
-function Digital({ zone, className }: { zone: string; className?: string }) {
+// ---------------------------------------------------------------------------
+// Text written by ref
+
+function Digital({ zone, seconds, className }: { zone: string; seconds?: boolean; className?: string }) {
+  const ref = React.useRef<HTMLSpanElement>(null)
+  React.useEffect(() => {
+    const fmt = new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit", second: seconds ? "2-digit" : undefined })
+    const write = () => {
+      if (ref.current) ref.current.textContent = fmt.format(new Date())
+    }
+    write()
+    const t = window.setInterval(write, seconds ? 200 : 1000)
+    return () => window.clearInterval(t)
+  }, [zone, seconds])
+  return <span ref={ref} className={className} />
+}
+
+function Offset({ zone, className }: { zone: string; className?: string }) {
   const ref = React.useRef<HTMLSpanElement>(null)
   React.useEffect(() => {
     const write = () => {
-      if (ref.current) ref.current.textContent = timeIn(zone, Date.now())
+      if (ref.current) ref.current.textContent = offsetLabel(zone, Date.now())
     }
     write()
-    const t = window.setInterval(write, 1000)
+    const t = window.setInterval(write, 30000)
     return () => window.clearInterval(t)
   }, [zone])
   return <span ref={ref} className={className} />
 }
 
-function Offset({ zone, short, className }: { zone: string; short?: boolean; className?: string }) {
+function DateLine({ zone, className }: { zone: string; className?: string }) {
   const ref = React.useRef<HTMLSpanElement>(null)
   React.useEffect(() => {
+    const fmt = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short", month: "short", day: "numeric" })
     const write = () => {
-      if (ref.current) ref.current.textContent = offsetLabel(zone, Date.now(), short)
+      if (ref.current) ref.current.textContent = fmt.format(new Date())
     }
     write()
     const t = window.setInterval(write, 30000)
     return () => window.clearInterval(t)
-  }, [zone, short])
+  }, [zone])
   return <span ref={ref} className={className} />
 }
 
-/** The three world-time beads: each runs out from the hub to the rim along that city's own hour hand. */
-function Beads({ R, live, hot, onHot, onActivate }: { R: number; live: boolean; hot: number | null; onHot: (i: number | null) => void; onActivate: () => void }) {
-  const arms = React.useRef<(HTMLDivElement | null)[]>([])
-  React.useEffect(() => {
-    const write = () => {
-      const now = Date.now()
-      const angles = WORLD.map((c) => hourAngle(c.zone, now))
-      // two cities whose hands nearly coincide: the second bead stops short so they do not overlap
-      const reach = angles.map((a, i) => (angles.slice(0, i).some((b) => Math.abs(((a - b + 540) % 360) - 180) < 30) ? 0.62 : 1))
-      angles.forEach((a, i) => {
-        arms.current[i]?.style.setProperty("--a", a.toFixed(2) + "deg")
-        arms.current[i]?.style.setProperty("--r", String(reach[i]))
-      })
+/**
+ * A line of text that changes in place: the old content slides 6px up and out
+ * while the new slides up into the line, on a spring (k=170 c=22). Both
+ * layers share one grid cell, so the line never changes size.
+ */
+function Swap({ value, render, className }: { value: string; render: (v: string) => React.ReactNode; className?: string }) {
+  const [pair, setPair] = React.useState({ prev: value, cur: value })
+  if (pair.cur !== value) setPair({ prev: pair.cur, cur: value })
+  const ref = React.useRef<HTMLSpanElement>(null)
+  React.useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || pair.prev === pair.cur) return
+    if (reduceMotion()) {
+      el.style.setProperty("--sw", "1")
+      return
     }
-    write()
-    const t = window.setInterval(write, 30000)
-    return () => window.clearInterval(t)
-  }, [])
+    let x = 0
+    let v = 0
+    let last = 0
+    let raf = 0
+    el.style.setProperty("--sw", "0")
+    const frame = (t: number) => {
+      const dt = last ? Math.min(0.05, (t - last) / 1000) : 0.016
+      last = t
+      ;[x, v] = step(x, v, 1, 170, 22, dt)
+      const done = Math.abs(1 - x) < 0.001 && Math.abs(v) < 0.001
+      el.style.setProperty("--sw", (done ? 1 : x).toFixed(4))
+      raf = done ? 0 : requestAnimationFrame(frame)
+    }
+    raf = requestAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(raf)
+      el.style.setProperty("--sw", "1")
+    }
+  }, [pair])
   return (
-    <div className="ck-beads" style={{ "--R": R + "px" } as React.CSSProperties}>
-      {WORLD.map((c, i) => (
-        <div key={c.code} ref={(el) => void (arms.current[i] = el)} className="ck-arm" style={{ "--b": `var(--bead-${i})`, "--a": "0deg", "--r": 1 } as React.CSSProperties}>
-          <i className="ck-ghost" />
-          <span
-            className={"ck-bead go-mono" + (live ? " go-live" : "")}
-            data-hot={hot === i || undefined}
-            onPointerEnter={() => onHot(i)}
-            onPointerLeave={() => onHot(null)}
-            onClick={(e) => e.stopPropagation()}
-            // beads go live while still gathered at the hub, so a double-click on the open face often lands on one
-            onDoubleClick={(e) => {
-              e.stopPropagation()
-              onActivate()
-            }}
-          >
-            {c.code}
-          </span>
-        </div>
-      ))}
-    </div>
+    <span ref={ref} className={"ck-swap" + (className ? " " + className : "")} style={{ "--sw": 1 } as React.CSSProperties}>
+      <span key={"o" + pair.prev} className="ck-swap-old" aria-hidden="true">
+        {render(pair.prev)}
+      </span>
+      <span key={"n" + pair.cur} className="ck-swap-new">
+        {render(pair.cur)}
+      </span>
+    </span>
   )
 }
 
@@ -233,127 +303,144 @@ function Beads({ R, live, hot, onHot, onActivate }: { R: number; live: boolean; 
 
 type Slot = { x: number; y: number; size: number }
 
-/** Face positions (top-left and size) per widget size; captions and chips hang off these. */
+/** Face positions (top-left and size) per widget size; captions hang off these. */
 const SLOTS: Record<WidgetSize, Slot[]> = {
-  small: [{ x: 33, y: 31, size: 104 }],
+  small: [{ x: 33, y: 29, size: 104 }],
   medium: ALL.map((_, i) => ({ x: Math.round(45.5 + 91 * i - 39), y: 18, size: 78 })),
   large: ALL.map((_, i) => ({ x: (i % 2 ? 273 : 91) - 60, y: (i < 2 ? 0 : 182) + 10, size: 120 })),
 }
 
-/** One face on its own layer above the pane: lifts on hover (`--fh`), comes forward when open (`--f`). */
-function FaceSlot({ slot, i, zone, children }: { slot: Slot; i: number; zone: string; children?: React.ReactNode }) {
+/** One face on the card, with the dial glass's sheen over it. `--lift` raises it (medium/large click). */
+function FaceSlot({ slot, i, zone, dir }: { slot: Slot; i: number; zone: string; dir?: 0 | 1 }) {
   return (
-    <div
-      className="ck-fw"
-      style={{ left: slot.x, top: slot.y, width: slot.size, height: slot.size, "--fh": `var(--fh-${i})`, "--f": `var(${i ? `--face-${i}` : "--face"})` } as React.CSSProperties}
-    >
+    <div className="ck-fw" style={{ left: slot.x, top: slot.y, width: slot.size, height: slot.size, "--lift": `var(--lift-${i})` } as React.CSSProperties}>
       <i className="ck-fshadow" />
-      <Face zone={zone} size={slot.size} />
-      {children}
+      <Face zone={zone} size={slot.size} dir={dir} />
+      <i className="ck-sheen" />
     </div>
-  )
-}
-
-/** A sheet chip that rises beneath a face when the widget is open. */
-function Chip({ city, drive, hot, short, style }: { city: City; drive: string; hot?: boolean; short?: boolean; style: React.CSSProperties }) {
-  return (
-    <GlassSheet className="ck-chip" style={{ ...style, "--b": `var(${drive})` } as React.CSSProperties}>
-      <span className="ck-chip-in" data-hot={hot || undefined}>
-        <span className="ck-chip-time go-mono">
-          {short ? <span className="ck-chip-code">{city.code} </span> : null}
-          <Digital zone={city.zone} />
-        </span>
-        <Offset zone={city.zone} short={short} className="ck-chip-off go-soft" />
-      </span>
-    </GlassSheet>
   )
 }
 
 // ---------------------------------------------------------------------------
 // The mechanism
 
-function ClockBody({ size }: { size: WidgetSize }) {
-  const { hover, focused, open, tone, rootRef, onFrame, setOpen, activate } = useGlass()
-  const [hot, setHot] = React.useState<number | null>(null)
+export type ClockHandlers = { click: () => void; reset: () => void }
 
-  // the springs live on the object's root so every child's calc() reaches them
-  const face0 = useSpringVar(rootRef, "--face", 0, 200, 16)
-  const face1 = useSpringVar(rootRef, "--face-1", 0, 200, 16)
-  const face2 = useSpringVar(rootRef, "--face-2", 0, 200, 16)
-  const face3 = useSpringVar(rootRef, "--face-3", 0, 200, 16)
-  const bead0 = useSpringVar(rootRef, "--bead-0", 0, 240, 15)
-  const bead1 = useSpringVar(rootRef, "--bead-1", 0, 240, 15)
-  const bead2 = useSpringVar(rootRef, "--bead-2", 0, 240, 15)
-  const fh0 = useSpringVar(rootRef, "--fh-0", 0, 170, 17)
-  const fh1 = useSpringVar(rootRef, "--fh-1", 0, 170, 17)
-  const fh2 = useSpringVar(rootRef, "--fh-2", 0, 170, 17)
-  const fh3 = useSpringVar(rootRef, "--fh-3", 0, 170, 17)
-  const sway = useSpringVar(rootRef, "--sway", 0, 30, 1.8)
-
+function ClockBody({ size, handlersRef }: { size: WidgetSize; handlersRef: React.RefObject<ClockHandlers> }) {
+  const { tone, rootRef } = useGlass()
   const slots = SLOTS[size]
-  const { w: W, h: H } = WIDGET[size]
-  const near = React.useRef(0)
-  const up = hover || focused
+  const small = size === "small"
 
-  // hover: every face rises off the pane, the one nearest the pointer most
-  const lifts = React.useCallback(
-    (on: boolean) => {
-      const fh = [fh0, fh1, fh2, fh3]
-      slots.forEach((_, i) => fh[i](on ? (slots.length === 1 || i === near.current ? 1 : 0.4) : 0))
-    },
-    [fh0, fh1, fh2, fh3, slots],
-  )
+  // small: where in the ring of cities the watch is, and which way the hands should travel
+  const [ring, setRing] = React.useState<{ i: number; dir: 0 | 1 }>({ i: 0, dir: 1 })
+  // medium / large: the face that was clicked, showing seconds and date
+  const [active, setActive] = React.useState<number | null>(null)
+
+  const ringSpring = useSpringVar(rootRef, "--ring", 0, 200, 22)
+  const lift0 = useSpringVar(rootRef, "--lift-0", 0, 300, 20)
+  const lift1 = useSpringVar(rootRef, "--lift-1", 0, 300, 20)
+  const lift2 = useSpringVar(rootRef, "--lift-2", 0, 300, 20)
+  const lift3 = useSpringVar(rootRef, "--lift-3", 0, 300, 20)
+
+  React.useEffect(() => ringSpring(ring.i), [ring.i, ringSpring])
+  React.useEffect(() => {
+    const lifts = [lift0, lift1, lift2, lift3]
+    // up briskly with a hair of overshoot; back down softly
+    lifts.forEach((l, i) => l(active === i ? 1 : 0, active === i ? { k: 300, c: 20 } : { k: 160, c: 20 }))
+    if (active === null) return
+    const t = window.setTimeout(() => setActive(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [active, lift0, lift1, lift2, lift3])
+
+  // where the last press landed, to know which face a click meant
+  const pointer = React.useRef<{ x: number; y: number } | null>(null)
+  React.useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+    const down = (e: PointerEvent) => {
+      const r = el.getBoundingClientRect()
+      pointer.current = { x: ((e.clientX - r.left) / r.width) * WIDGET[size].w, y: ((e.clientY - r.top) / r.height) * WIDGET[size].h }
+    }
+    el.addEventListener("pointerdown", down)
+    return () => el.removeEventListener("pointerdown", down)
+  }, [rootRef, size])
 
   React.useEffect(() => {
-    lifts(up)
-    if (up) sway(undefined, { impulse: 0.6 })
-  }, [up, lifts, sway])
-
-  React.useEffect(() => {
-    if (slots.length === 1) return
-    return onFrame((f) => {
-      if (!f.hover) return
-      const x = ((f.px + 1) / 2) * W
-      const y = ((f.py + 1) / 2) * H
-      let best = 0
-      let bd = Infinity
-      slots.forEach((s, i) => {
-        const d = Math.hypot(s.x + s.size / 2 - x, s.y + s.size / 2 - y)
-        if (d < bd) {
-          bd = d
-          best = i
+    handlersRef.current = {
+      click: () => {
+        if (small) {
+          setRing((r) => ({ i: (r.i + 1) % ALL.length, dir: 1 }))
+          return
         }
-      })
-      if (best !== near.current) {
-        near.current = best
-        lifts(true)
-      }
-    })
-  }, [slots, W, H, onFrame, lifts])
+        const p = pointer.current
+        let best = 0
+        if (p) {
+          let bd = Infinity
+          slots.forEach((s, i) => {
+            const d = Math.hypot(s.x + s.size / 2 - p.x, s.y + s.size / 2 - p.y)
+            if (d < bd) {
+              bd = d
+              best = i
+            }
+          })
+        }
+        pointer.current = null
+        setActive((a) => (a === best ? null : best))
+      },
+      reset: () => {
+        setRing((r) => (r.i === 0 ? r : { i: 0, dir: 0 }))
+        setActive(null)
+      },
+    }
+    return () => {
+      handlersRef.current = { click: () => {}, reset: () => {} }
+    }
+  }, [handlersRef, small, slots])
 
-  // open: the pane hinges away (engine --go-open); 140ms later the faces come forward, then the beads run out
+  // Escape, or a press elsewhere, takes the watch home
+  const away = small ? ring.i !== 0 : active !== null
   React.useEffect(() => {
-    const face = [face0, face1, face2, face3]
-    const beads = [bead0, bead1, bead2]
-    slots.forEach((_, i) => face[i](open ? 1 : 0, { k: 200, c: 16, delay: open ? 140 + i * 60 : 0 }))
-    if (slots.length === 1) beads.forEach((b, j) => b(open ? 1 : 0, open ? { k: 240, c: 15, delay: 260 + j * 60 } : { k: 200, c: 16 }))
-  }, [open, slots, face0, face1, face2, face3, bead0, bead1, bead2])
+    if (!away) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") handlersRef.current.reset()
+    }
+    const onDown = (e: PointerEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) handlersRef.current.reset()
+    }
+    document.addEventListener("keydown", onKey)
+    document.addEventListener("pointerdown", onDown)
+    return () => {
+      document.removeEventListener("keydown", onKey)
+      document.removeEventListener("pointerdown", onDown)
+    }
+  }, [away, handlersRef, rootRef])
 
-  const hotNow = open ? hot : null
+  const city = ALL[ring.i]
 
   return (
     <>
-      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.pearl} seed={size === "small" ? 2 : size === "medium" ? 5 : 7} cells={size === "small" ? 48 : 80} />
+      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.pearl} seed={small ? 2 : size === "medium" ? 5 : 7} cells={small ? 72 : 120} />
       <div className="ck-back" aria-hidden="true" />
 
-      {/* the card: one frosted pane with the captions on it; it hinges away when opened */}
-      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} frost={0.9} radius={22} className="ck-pane">
-        {size === "small" ? (
+      {/* the card: one flat frosted pane with the captions on it */}
+      <GlassPane hinge="none" frost={0.9} radius={22} className="ck-pane">
+        {small ? (
           <>
-            <span className="ck-city ck-s-city">{HOME.name}</span>
-            <span className="ck-s-foot">
-              <Offset zone={HOME.zone} className="ck-off go-soft" />
-              <Digital zone={HOME.zone} className="ck-time go-mono" />
+            <Swap className="ck-s-city" value={String(ring.i)} render={(v) => <span className="ck-city">{ALL[+v].name}</span>} />
+            <Swap
+              className="ck-s-foot"
+              value={String(ring.i)}
+              render={(v) => (
+                <span className="ck-s-row">
+                  <Offset zone={ALL[+v].zone} className="ck-off go-soft" />
+                  <Digital zone={ALL[+v].zone} className="ck-time go-mono" />
+                </span>
+              )}
+            />
+            <span className="ck-ring" aria-hidden="true">
+              {ALL.map((c, i) => (
+                <i key={c.code} className="ck-dot" style={{ "--i": i } as React.CSSProperties} />
+              ))}
             </span>
           </>
         ) : (
@@ -362,49 +449,36 @@ function ClockBody({ size }: { size: WidgetSize }) {
             return (
               <span key={c.code} className="ck-cap-col" style={{ left: s.x + s.size / 2, top: s.y + s.size + (size === "large" ? 4 : 6) }}>
                 <span className="ck-city">{c.name}</span>
-                <Offset zone={c.zone} className="ck-off go-soft" />
-                <Digital zone={c.zone} className="ck-time go-mono" />
+                <Swap
+                  className="ck-cap-swap"
+                  value={active === i ? "detail" : "plain"}
+                  render={(v) =>
+                    v === "detail" ? (
+                      <span className="ck-cap-lines">
+                        <DateLine zone={c.zone} className="ck-off go-soft" />
+                        <Digital zone={c.zone} seconds className="ck-time go-mono" />
+                      </span>
+                    ) : (
+                      <span className="ck-cap-lines">
+                        <Offset zone={c.zone} className="ck-off go-soft" />
+                        <Digital zone={c.zone} className="ck-time go-mono" />
+                      </span>
+                    )
+                  }
+                />
               </span>
             )
           })
         )}
       </GlassPane>
 
-      {/* the faces, sitting on the pane */}
-      {size === "small" ? (
-        <FaceSlot slot={slots[0]} i={0} zone={HOME.zone}>
-          <Beads
-            R={37}
-            live={open}
-            hot={hot}
-            onHot={setHot}
-            onActivate={() => {
-              setOpen(false)
-              activate()
-            }}
-          />
-        </FaceSlot>
-      ) : (
-        ALL.map((c, i) => <FaceSlot key={c.code} slot={slots[i]} i={i} zone={c.zone} />)
-      )}
-
-      {/* what the open widget reads: chips that rise beneath */}
-      <div className="ck-chips" aria-hidden={!open}>
-        {size === "small"
-          ? WORLD.map((c, j) => <Chip key={c.code} city={c} drive={`--bead-${j}`} short hot={hotNow === j} style={{ left: 8 + j * 52, top: 131, width: 50, height: 34 }} />)
-          : ALL.map((c, i) => {
-              const s = slots[i]
-              const w = size === "large" ? 128 : 84
-              return (
-                <Chip
-                  key={c.code}
-                  city={c}
-                  drive={i ? `--face-${i}` : "--face"}
-                  style={{ left: s.x + s.size / 2 - w / 2, top: s.y + s.size + (size === "large" ? 4 : 2), width: w, height: size === "large" ? 38 : 36 }}
-                />
-              )
-            })}
-      </div>
+      {/* the faces, on the card */}
+      {small ? <FaceSlot slot={slots[0]} i={0} zone={city.zone} dir={ring.dir} /> : ALL.map((c, i) => <FaceSlot key={c.code} slot={slots[i]} i={i} zone={c.zone} />)}
+      {small ? (
+        <span className="ck-live" aria-live="polite">
+          {ring.i ? city.name : ""}
+        </span>
+      ) : null}
     </>
   )
 }
@@ -412,6 +486,7 @@ function ClockBody({ size }: { size: WidgetSize }) {
 export function ClockWidget({ size = "small", className, appearDelay = 0 }: { size?: WidgetSize; className?: string; appearDelay?: number }) {
   const { open, tone } = useWindowManager()
   const { w, h } = WIDGET[size]
+  const handlersRef = React.useRef<ClockHandlers>({ click: () => {}, reset: () => {} })
   return (
     <GlassObject
       width={w}
@@ -419,118 +494,105 @@ export function ClockWidget({ size = "small", className, appearDelay = 0 }: { si
       tone={tone}
       label="Clock"
       radius={22}
+      tilt={2}
+      hoverLift={0}
+      // the card never opens outward; a click (which asks to open) operates the clock instead
+      open={false}
+      onOpenChange={(next) => {
+        if (next) handlersRef.current.click()
+      }}
       appearDelay={appearDelay}
       className={"ck-root ck-" + size + (className ? " " + className : "")}
-      onActivate={() => open("clock", { singleton: "app", title: APPS.clock.name, w: APPS.clock.defaultSize.w, h: APPS.clock.defaultSize.h })}
+      onActivate={() => {
+        handlersRef.current.reset()
+        open("clock", { singleton: "app", title: APPS.clock.name, w: APPS.clock.defaultSize.w, h: APPS.clock.defaultSize.h })
+      }}
     >
       <style href="clock-object" precedence="glass-widget">
         {CK_CSS}
       </style>
-      <ClockBody key={size} size={size} />
+      <ClockBody key={size} size={size} handlersRef={handlersRef} />
     </GlassObject>
   )
 }
 
 const CK_CSS = `
-.ck-root {
-  --face: 0; --face-1: 0; --face-2: 0; --face-3: 0;
-  --bead-0: 0; --bead-1: 0; --bead-2: 0;
-  --fh-0: 0; --fh-1: 0; --fh-2: 0; --fh-3: 0;
-  --sway: 0;
-}
+.ck-root { --ring: 0; --lift-0: 0; --lift-1: 0; --lift-2: 0; --lift-3: 0; }
 .ck-root .go-tilt { border-radius: 22px; }
 .ck-root .go-liquid { border-radius: 22px; }
 .ck-back { position: absolute; inset: 0; border-radius: 22px; pointer-events: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 0 0 .5px rgba(0,0,0,.08); }
 .ck-root[data-tone="dark"] .ck-back { box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 0 0 .5px rgba(255,255,255,.1); }
 
-/* the card: frosted almost to white, like the Sonoma widget */
-/*
- * No backdrop filter: the card frosts our own liquid, which is already soft,
- * and Chrome samples a 3D-rotated backdrop mirrored (it picked up the widget
- * below as the pane leaned). The tint carries the frost instead.
- */
+/* the card: frosted almost to white, like the Sonoma widget. It frosts our own
+   (already soft) liquid, so the tint carries the frost and no backdrop filter is needed. */
 .ck-root .ck-pane { -webkit-backdrop-filter: none; backdrop-filter: none; }
-.ck-root:not([data-tone="dark"]) .ck-pane .go-pane-tint {
-  background: linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,255,255,.93));
-}
-.ck-root[data-tone="dark"] .ck-pane .go-pane-tint {
-  background: linear-gradient(180deg, rgba(34,34,38,.86), rgba(26,26,30,.92));
-}
+.ck-root:not([data-tone="dark"]) .ck-pane .go-pane-tint { background: linear-gradient(180deg, rgba(255,255,255,.86), rgba(255,255,255,.93)); }
+.ck-root[data-tone="dark"] .ck-pane .go-pane-tint { background: linear-gradient(180deg, rgba(34,34,38,.86), rgba(26,26,30,.92)); }
 
 /* captions, macOS type: 13 / 11 / 10, tight tracking, tabular figures */
 .ck-city { font-size: 13px; font-weight: 600; letter-spacing: -.01em; line-height: 16px; white-space: nowrap; }
 .ck-off { font-size: 11px; letter-spacing: -.005em; line-height: 13px; white-space: nowrap; }
 .ck-time { font-size: 11px; line-height: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0; }
 .ck-s-city { position: absolute; left: 14px; top: 10px; }
-.ck-s-foot { position: absolute; left: 14px; right: 14px; bottom: 11px; display: flex; justify-content: space-between; align-items: baseline; }
+.ck-s-foot { position: absolute; left: 14px; right: 14px; bottom: 16px; }
+.ck-s-row { display: flex; justify-content: space-between; align-items: baseline; }
 .ck-cap-col { position: absolute; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%); }
+.ck-cap-lines { display: flex; flex-direction: column; align-items: center; }
 .ck-medium .ck-city { font-size: 12px; line-height: 15px; }
 .ck-medium .ck-off, .ck-medium .ck-time { font-size: 10px; line-height: 12px; }
 .ck-large .ck-off { font-size: 10.5px; }
 
-/* a face: its own layer on the pane; rises 3px and its shadow spreads on hover; comes forward when open */
-.ck-fw {
-  position: absolute;
-  transform-origin: 50% 50%;
-  transform: translateY(calc(var(--fh) * -3px - var(--f) * var(--fy, 6px))) scale(calc(1 + var(--f) * var(--fs, .06)));
+/* a line that changes in place: old slides up and out, new slides up in */
+.ck-swap { display: grid; }
+.ck-swap > * { grid-area: 1 / 1; }
+.ck-swap-old { opacity: calc(1 - var(--sw)); transform: translateY(calc(var(--sw) * -6px)); }
+.ck-swap-new { opacity: var(--sw); transform: translateY(calc((1 - var(--sw)) * 6px)); }
+.ck-swap-old:only-child { opacity: 1; transform: none; }
+.ck-cap-swap { justify-items: center; }
+
+/* the ring of four cities */
+.ck-ring { position: absolute; left: 0; right: 0; bottom: 7px; display: flex; justify-content: center; gap: 4px; }
+.ck-dot {
+  --on: max(0, 1 - max(var(--ring) - var(--i), var(--i) - var(--ring)));
+  display: block; width: 4px; height: 4px; border-radius: 50%;
+  background: var(--go-ink);
+  opacity: calc(.18 + var(--on) * .67);
+  transform: scale(calc(.85 + var(--on) * .25));
 }
-.ck-small .ck-fw { --fy: 12px; --fs: .12; }
+.ck-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+/* a face: sits on the card; a medium/large click lifts it 2px */
+.ck-fw { position: absolute; transform: translateY(calc(var(--lift) * -2px)); }
 .ck-fshadow {
   position: absolute; inset: 0; display: block; border-radius: 50%;
-  box-shadow: 0 calc(2px + var(--fh) * 6px) calc(5px + var(--fh) * 10px) rgba(16,18,24,calc(.14 + var(--fh) * .1));
-  transform: translateY(calc(var(--fh) * 2px));
+  box-shadow: 0 calc(2px + var(--lift) * 3px) calc(5px + var(--lift) * 5px) rgba(16,18,24,calc(.14 + var(--lift) * .06));
 }
-.ck-root[data-tone="dark"] .ck-fshadow { box-shadow: 0 calc(2px + var(--fh) * 6px) calc(5px + var(--fh) * 10px) rgba(0,0,0,calc(.4 + var(--fh) * .15)); }
+.ck-root[data-tone="dark"] .ck-fshadow { box-shadow: 0 calc(2px + var(--lift) * 3px) calc(5px + var(--lift) * 5px) rgba(0,0,0,calc(.4 + var(--lift) * .1)); }
 .ck-face { position: relative; display: block; overflow: visible; }
-.ck-dial { fill: #ffffff; stroke: rgba(0,0,0,.06); stroke-width: .5; }
-.ck-face[data-night="true"] .ck-dial { fill: #1c1c1e; stroke: rgba(255,255,255,.1); }
-.ck-tick { stroke: rgba(20,20,22,.28); stroke-width: .7; stroke-linecap: round; }
-.ck-tick-h { stroke: rgba(20,20,22,.55); stroke-width: 1.1; }
-.ck-face[data-night="true"] .ck-tick { stroke: rgba(255,255,255,.28); }
-.ck-face[data-night="true"] .ck-tick-h { stroke: rgba(255,255,255,.6); }
-.ck-num { font: 500 10.5px ui-sans-serif, system-ui, -apple-system, "SF Pro Text", sans-serif; letter-spacing: -.02em; fill: #1d1d1f; }
-.ck-face[data-night="true"] .ck-num { fill: #f5f5f7; }
-.ck-hand { stroke: #1d1d1f; stroke-linecap: round; }
+
+/* day ↔ night: every colour is mixed from --n, which a spring drives */
+.ck-dial { fill: color-mix(in srgb, #1c1c1e calc(var(--n) * 100%), #ffffff); stroke: color-mix(in srgb, rgba(255,255,255,.1) calc(var(--n) * 100%), rgba(0,0,0,.06)); stroke-width: .5; }
+.ck-tick { stroke: color-mix(in srgb, rgba(255,255,255,.28) calc(var(--n) * 100%), rgba(20,20,22,.28)); stroke-width: .7; stroke-linecap: round; }
+.ck-tick-h { stroke: color-mix(in srgb, rgba(255,255,255,.6) calc(var(--n) * 100%), rgba(20,20,22,.55)); stroke-width: 1.1; }
+.ck-num { font: 500 10.5px ui-sans-serif, system-ui, -apple-system, "SF Pro Text", sans-serif; letter-spacing: -.02em; fill: color-mix(in srgb, #f5f5f7 calc(var(--n) * 100%), #1d1d1f); }
+.ck-hand { stroke: color-mix(in srgb, #f5f5f7 calc(var(--n) * 100%), #1d1d1f); stroke-linecap: round; }
 .ck-hour { stroke-width: 3.6; }
 .ck-minute { stroke-width: 2.6; }
-.ck-face[data-night="true"] .ck-hand { stroke: #f5f5f7; }
 .ck-second { stroke: #ff9500; stroke-width: 1.1; stroke-linecap: round; }
 .ck-cap { fill: #ff9500; }
-.ck-cap-dot { fill: #fff; }
-.ck-face[data-night="true"] .ck-cap-dot { fill: #1c1c1e; }
-.ck-balance { transform: rotate(calc(var(--sway) * 14deg)); }
+.ck-cap-dot { fill: color-mix(in srgb, #1c1c1e calc(var(--n) * 100%), #ffffff); }
 
-/* beads: city capsules that run out from the hub to the rim along their own hour hands */
-.ck-beads { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
-.ck-arm { position: absolute; left: 0; top: 0; width: 0; height: 0; transform: rotate(var(--a)); }
-.ck-ghost { position: absolute; display: block; left: -1px; bottom: 0; width: 2px; height: calc(var(--b) * var(--R) * var(--r)); border-radius: 1px; background: #1d1d1f; opacity: calc(min(1, var(--b) * 4) * .35); }
-.ck-bead {
-  position: absolute; left: 0; top: 0; width: 22px; height: 14px; margin: -7px 0 0 -11px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 7px; font-size: 8.5px; font-weight: 600; letter-spacing: .02em; color: #1d1d1f;
-  background: rgba(255,255,255,.92);
-  box-shadow: 0 0 0 .5px rgba(0,0,0,.14), 0 2px 5px -1px rgba(16,18,24,.3);
-  opacity: clamp(0, calc(var(--b) * 3), 1);
-  transform: translateY(calc(var(--b) * var(--R) * var(--r) * -1)) rotate(calc(var(--a) * -1)) scale(calc(.5 + var(--b) * .5));
-  cursor: default;
+/* hover: the hands lift off the dial — up a pixel, their shadow growing */
+.ck-hands {
+  transform: translateY(calc(var(--go-hover) * -1px));
+  filter: drop-shadow(0 calc(.6px + var(--go-hover) * 2.4px) calc(.6px + var(--go-hover) * 1.8px) rgba(0,0,0,calc(.22 + var(--go-hover) * .16)));
 }
-.ck-bead[data-hot] { background: #ff9500; color: #fff; box-shadow: 0 0 0 .5px rgba(0,0,0,.1), 0 3px 8px -2px rgba(255,149,0,.6); }
-.ck-face[data-night="true"] ~ .ck-beads .ck-ghost { background: #f5f5f7; }
 
-/* chips: the open widget's readouts, rising beneath the faces */
-.ck-chips { position: absolute; inset: 0; pointer-events: none; }
-.ck-chip {
-  border-radius: 10px;
-  opacity: clamp(0, calc(var(--b) * 1.4 - .2), 1);
-  transform: translateY(calc((1 - var(--b)) * 14px)) scale(calc(.94 + var(--b) * .06));
+/* hover: a soft sheen crosses the dial glass with the pointer */
+.ck-sheen { position: absolute; inset: 0; display: block; border-radius: 50%; overflow: hidden; pointer-events: none; opacity: var(--go-hover); }
+.ck-sheen::before {
+  content: ""; position: absolute; top: -10%; bottom: -10%; left: -60%; width: 220%;
+  background: linear-gradient(105deg, rgba(255,255,255,0) 36%, rgba(255,255,255,.22) 46%, rgba(255,255,255,.32) 50%, rgba(255,255,255,.22) 54%, rgba(255,255,255,0) 64%);
+  transform: translateX(calc(var(--go-px) * 30%));
 }
-.ck-chip-in { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; border-radius: inherit; }
-.ck-chip-in[data-hot] { box-shadow: inset 0 0 0 1.5px #ff9500; }
-.ck-chip-time { font-size: 11px; font-weight: 600; line-height: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: -.01em; }
-.ck-chip-code { font-weight: 500; color: var(--go-ink-soft); }
-.ck-chip-off { font-size: 9.5px; line-height: 11px; white-space: nowrap; }
-.ck-small .ck-chip-time { font-size: 10px; }
-.ck-small .ck-chip-code { display: block; text-align: center; font-size: 8.5px; line-height: 10px; letter-spacing: .04em; }
-.ck-large .ck-chip-time { font-size: 13px; line-height: 16px; }
-.ck-large .ck-chip-off { font-size: 10px; line-height: 12px; }
 `
