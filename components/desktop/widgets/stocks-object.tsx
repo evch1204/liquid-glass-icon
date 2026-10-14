@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { GlassObject, GlassPane, GlassSheet, LIQUIDS, LiquidCanvas, useGlass, useSpringVar, type LiquidHandle, type LiquidRecipe } from "@/components/ui/glass-object"
+import { GlassObject, GlassPane, LIQUIDS, LiquidCanvas, useGlass, useSpringVar, type LiquidHandle, type LiquidRecipe } from "@/components/ui/glass-object"
 import { hashString, rng } from "@/components/ui/glass-folder-cards"
 import { WIDGET, type WidgetSize } from "../glass"
 import { useWindowManager } from "../window-manager"
@@ -15,14 +15,17 @@ import { useWindowManager } from "../window-manager"
  * point are rewritten by ref, the end dot glows for a moment and the liquid
  * stirs.
  *
- * - **Hover**: the pane leans back and the object lifts; the quotes lift off
- *   the pane in a stagger with spreading shadows, the one under the pointer a
- *   little more, its sparkline tip glowing.
- * - **Open** (click): the pane hinges down and away like the folder's front;
- *   the quotes rise out as cards and fan, and the one under the pointer (or
- *   the first) opens into a chart: gridlines, the previous close, a stroke
- *   that inks itself in, and Open / High / Low.
- * - **Activate** (double-click, Enter): the Stocks app on the quote under the
+ * Nothing ever leaves the card and the card never changes size or shape.
+ *
+ * - **Hover**: a soft band brightens the row under the pointer and slides from
+ *   row to row on a spring; that row's sparkline redraws from the left, its
+ *   end dot glows and its price rolls up to the live value.
+ * - **Open** (click): an accordion. The clicked row (AAPL on small) expands in
+ *   place into a chart — gridlines, the previous close, a stroke that inks
+ *   itself in, O/H/L/Vol — while the others compress to one-line strips
+ *   below. Clicking a strip swaps it in; Escape or a click outside collapses
+ *   back to the native list.
+ * - **Activate** (double-click, Enter): the Stocks app on the row under the
  *   pointer (or the top ticker).
  */
 
@@ -238,116 +241,132 @@ function Liquid({ symbols, seed, cells, handle }: { symbols: string[]; seed: num
 }
 
 // ---------------------------------------------------------------------------
-// Layout, per size. Every number is a pixel in the widget's own box.
+// Layout, per size. Every number is a pixel in the widget's own box. Nothing
+// ever leaves the card: open is an accordion inside the same frame.
 
-type Box = { x: number; y: number; w: number; h: number }
-/** Where an open card goes, and how far it turns as it fans. */
-type Slot = Box & { rot: number }
 type Layout = {
   symbols: string[]
+  hero: boolean
   header: boolean
-  /** Rest boxes for the quotes; `hidden` ones wait behind the pane until it opens. */
-  rest: (Box & { hidden?: boolean })[]
-  /** Open slots: the first is the chart, the rest are cards. */
-  slots: Slot[]
-  restFace: "hero" | "line"
-  cardFace: "card" | "mini"
-  index?: { rest: Box; open: Slot; card: boolean; spark: { w: number; h: number } }
-  /** Pixels between the lifts of neighbouring quotes on hover. */
-  liftStep: number
-  chart: { w: number; h: number }
+  /** Rows' left edge and width. */
+  x: number
+  w: number
+  /** Rest: first row's top, and each row's height. */
+  top: number
+  rowH: number
+  /** Open: the expanded row's box, and the strips below it. */
+  ey: number
+  eh: number
+  sy: number
+  sh: number
   restSpark: { w: number; h: number }
-  cardSpark: { w: number; h: number }
+  chart: { w: number; h: number }
 }
 
 const LAYOUT: Record<WidgetSize, Layout> = {
   small: {
-    symbols: ["AAPL", "NVDA", "TSLA"],
+    symbols: ["AAPL"],
+    hero: true,
     header: false,
-    rest: [
-      { x: 0, y: 0, w: 170, h: 170 },
-      { x: 40, y: 64, w: 90, h: 44, hidden: true },
-      { x: 40, y: 64, w: 90, h: 44, hidden: true },
-    ],
-    slots: [
-      { x: 8, y: 8, w: 154, h: 114, rot: 0 },
-      { x: 8, y: 126, w: 154, h: 18, rot: -0.8 },
-      { x: 8, y: 147, w: 154, h: 18, rot: 0.6 },
-    ],
-    restFace: "hero",
-    cardFace: "mini",
-    liftStep: 2,
-    chart: { w: 138, h: 50 },
+    x: 0,
+    w: 170,
+    top: 0,
+    rowH: 170,
+    ey: 0,
+    eh: 170,
+    sy: 0,
+    sh: 0,
     restSpark: { w: 142, h: 52 },
-    cardSpark: { w: 0, h: 0 },
+    chart: { w: 146, h: 62 },
   },
   medium: {
     symbols: ["AAPL", "NVDA", "TSLA"],
+    hero: false,
     header: true,
-    rest: [0, 1, 2].map((i) => ({ x: 14, y: 36 + i * 42, w: 336, h: 42 })),
-    slots: [
-      { x: 10, y: 8, w: 206, h: 128, rot: 0 },
-      { x: 222, y: 8, w: 132, h: 60, rot: 1.4 },
-      { x: 222, y: 74, w: 132, h: 60, rot: -1.2 },
-    ],
-    restFace: "line",
-    cardFace: "card",
-    index: { rest: { x: 14, y: 150, w: 336, h: 16 }, open: { x: 14, y: 142, w: 336, h: 22, rot: 0 }, card: false, spark: { w: 150, h: 16 } },
-    liftStep: 2,
-    chart: { w: 190, h: 56 },
+    x: 14,
+    w: 336,
+    top: 36,
+    rowH: 42,
+    ey: 8,
+    eh: 114,
+    sy: 124,
+    sh: 18,
     restSpark: { w: 90, h: 28 },
-    cardSpark: { w: 52, h: 18 },
+    chart: { w: 336, h: 50 },
   },
   large: {
     symbols: ["AAPL", "NVDA", "MSFT", "TSLA", "AMZN", "BTC-USD"],
+    hero: false,
     header: true,
-    rest: [0, 1, 2, 3, 4, 5].map((i) => ({ x: 14, y: 40 + i * 52, w: 336, h: 52 })),
-    slots: [
-      { x: 10, y: 10, w: 344, h: 160, rot: 0 },
-      { x: 10, y: 178, w: 168, h: 54, rot: -0.8 },
-      { x: 186, y: 178, w: 168, h: 54, rot: 0.8 },
-      { x: 10, y: 238, w: 168, h: 54, rot: 0.6 },
-      { x: 186, y: 238, w: 168, h: 54, rot: -0.6 },
-      { x: 10, y: 298, w: 168, h: 54, rot: -0.5 },
-    ],
-    restFace: "line",
-    cardFace: "card",
-    index: { rest: { x: 186, y: 330, w: 168, h: 20 }, open: { x: 186, y: 298, w: 168, h: 54, rot: 0.5 }, card: true, spark: { w: 148, h: 20 } },
-    liftStep: 1.5,
-    chart: { w: 324, h: 86 },
+    x: 14,
+    w: 336,
+    top: 40,
+    rowH: 52,
+    ey: 8,
+    eh: 178,
+    sy: 192,
+    sh: 32,
     restSpark: { w: 120, h: 30 },
-    cardSpark: { w: 70, h: 20 },
+    chart: { w: 336, h: 104 },
   },
 }
 
-const TOP = "AAPL"
+type RowBox = { y: number; h: number; e: number; c: number; strip: number }
 
-// ---------------------------------------------------------------------------
-// One quote: printed on the pane at rest, a glass card when open.
-
-type QuoteProps = {
-  symbol: string
-  /** Index at rest, top first: sets the hover stagger. */
-  i: number
-  /** Index among the open cards: sets the open stagger; 0 is the chart. */
-  order: number
-  count: number
-  rest: Box & { hidden?: boolean }
-  slot: Slot
-  L: Layout
-  up: boolean
-  open: boolean
-  hot: boolean
+/** Where every row sits, with `ex` expanded (or -1 for the native list). */
+function boxes(L: Layout, ex: number): RowBox[] {
+  if (L.hero) return [{ y: 0, h: 170, e: ex === 0 ? 1 : 0, c: 0, strip: -1 }]
+  let k = 0
+  return L.symbols.map((_, i) => {
+    if (ex < 0) return { y: L.top + i * L.rowH, h: L.rowH, e: 0, c: 0, strip: -1 }
+    if (i === ex) return { y: L.ey, h: L.eh, e: 1, c: 0, strip: -1 }
+    const strip = k++
+    return { y: L.sy + strip * L.sh, h: L.sh, e: 0, c: 1, strip }
+  })
 }
 
-function Quote({ symbol, i, order, count, rest, slot, L, up, open, hot }: QuoteProps) {
+const TOP = "AAPL"
+const SPRING = { k: 90, c: 13 }
+
+/** A plausible session volume per symbol, fixed so server and client agree. */
+function volume(symbol: string): string {
+  const v = ((hashString(symbol + "vol") % 900) + 120) / 10
+  return v.toFixed(1) + "M"
+}
+
+// ---------------------------------------------------------------------------
+// One row: a native list row, a one-line strip, or the expanded chart.
+
+type RowProps = {
+  symbol: string
+  i: number
+  L: Layout
+  box: RowBox
+  hot: boolean
+  live: boolean
+  onPick: (i: number) => void
+  onActivate: (symbol: string) => void
+}
+
+function Row({ symbol, i, L, box, hot, live, onPick, onActivate }: RowProps) {
   const t0 = INITIAL[symbol]
   const root = React.useRef<HTMLDivElement>(null)
-  const o = useSpringVar(root, "--o", 0, 160, 15)
-  const h = useSpringVar(root, "--h", 0, 140, 14)
-  const hotS = useSpringVar(root, "--hot", 0, 220, 20)
+  const rest = boxes(L, -1)[i]
+  const y = useSpringVar(root, "--y", rest.y, SPRING.k, SPRING.c)
+  const h = useSpringVar(root, "--h", rest.h, SPRING.k, SPRING.c)
+  const e = useSpringVar(root, "--e", 0, SPRING.k, SPRING.c)
+  const c = useSpringVar(root, "--c", 0, SPRING.k, SPRING.c)
+  const hotS = useSpringVar(root, "--hot", 0, 200, 20)
   const tick = useSpringVar(root, "--tick", 0, 40, 14)
-  const chart = order === 0
+  const rolling = React.useRef(false)
+
+  React.useEffect(() => {
+    y(box.y)
+    h(box.h)
+    e(box.e)
+    c(box.c)
+  }, [box.y, box.h, box.e, box.c, y, h, e, c])
+  React.useEffect(() => hotS(hot ? 1 : 0), [hot, hotS])
 
   // live numbers, written by ref; the end dot glows for a moment on each tick
   React.useEffect(() => {
@@ -356,7 +375,7 @@ function Quote({ symbol, i, order, count, rest, slot, L, up, open, hot }: QuoteP
     const write = () => {
       const t = market.get(symbol)
       el.setAttribute("data-dir", dirOf(t))
-      el.querySelectorAll("[data-f=price]").forEach((n) => (n.textContent = fmtPrice(last(t))))
+      if (!rolling.current) el.querySelectorAll("[data-f=price]").forEach((n) => (n.textContent = fmtPrice(last(t))))
       el.querySelectorAll("[data-f=pill]").forEach((n) => (n.textContent = fmtPct(pct(t))))
       el.querySelectorAll("[data-f=high]").forEach((n) => (n.textContent = fmtPrice(high(t))))
       el.querySelectorAll("[data-f=low]").forEach((n) => (n.textContent = fmtPrice(low(t))))
@@ -366,37 +385,48 @@ function Quote({ symbol, i, order, count, rest, slot, L, up, open, hot }: QuoteP
       write()
       tick(undefined, { impulse: 14 })
     })
-  }, [symbol, chart, tick])
+  }, [symbol, tick])
 
-  // hover: lift off the pane, top row first
-  const hoverTimer = React.useRef(0)
+  // hover: the sparkline redraws left to right on a spring, and the price rolls up to its live value
   React.useEffect(() => {
-    window.clearTimeout(hoverTimer.current)
-    const lift = up && !open && !rest.hidden
-    hoverTimer.current = window.setTimeout(() => h(lift ? 1 : 0), lift ? i * 40 : (count - 1 - i) * 25)
-  }, [up, open, i, count, rest.hidden, h])
-  React.useEffect(() => hotS(hot ? 1 : 0), [hot, hotS])
-
-  // open: rise out as a card, one after another; close in reverse
-  const openTimer = React.useRef(0)
-  const mounted = React.useRef(false)
-  React.useEffect(() => {
-    if (!mounted.current) {
-      mounted.current = true
-      if (!open) return
+    const el = root.current
+    if (!hot || !el) return
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return
+    const prices = el.querySelectorAll(".st-rest [data-f=price]")
+    const t = market.get(symbol)
+    const from = t.series[t.series.length - 7]
+    let p = 0
+    let v = 0
+    let lastT = 0
+    let raf = 0
+    const K = 42
+    const C = 2 * Math.sqrt(K)
+    rolling.current = true
+    const frame = (now: number) => {
+      const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 0.016
+      lastT = now
+      v += (-K * (p - 1) - C * v) * dt
+      p += v * dt
+      const done = Math.abs(1 - p) < 0.002 && Math.abs(v) < 0.01
+      if (done) p = 1
+      el.style.setProperty("--replay", p.toFixed(4))
+      const to = last(market.get(symbol))
+      const shown = fmtPrice(from + (to - from) * Math.min(1, p * 1.6))
+      prices.forEach((n) => (n.textContent = shown))
+      if (!done) raf = requestAnimationFrame(frame)
+      else rolling.current = false
     }
-    window.clearTimeout(openTimer.current)
-    openTimer.current = window.setTimeout(() => o(open ? 1 : 0), open ? 60 + order * 70 : (count - 1 - order) * 50)
-  }, [open, order, count, o])
-  React.useEffect(
-    () => () => {
-      window.clearTimeout(openTimer.current)
-      window.clearTimeout(hoverTimer.current)
-    },
-    [],
-  )
+    el.style.setProperty("--replay", "0")
+    raf = requestAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(raf)
+      rolling.current = false
+      el.style.setProperty("--replay", "1")
+      const now = fmtPrice(last(market.get(symbol)))
+      prices.forEach((n) => (n.textContent = now))
+    }
+  }, [hot, symbol])
 
-  const lift = rest.hidden ? 0 : L.liftStep + (count - 1 - i) * L.liftStep
   const pill = (
     <span className="st-pill go-mono" data-f="pill">
       {fmtPct(pct(t0))}
@@ -407,174 +437,119 @@ function Quote({ symbol, i, order, count, rest, slot, L, up, open, hot }: QuoteP
       {fmtPrice(last(t0))}
     </span>
   )
-  const card = L.cardFace
+  const ohlv = (
+    <div className="st-ohl go-mono">
+      <span>
+        <i>O</i>
+        {fmtPrice(t0.open)}
+      </span>
+      <span>
+        <i>H</i>
+        <b data-f="high">{fmtPrice(high(t0))}</b>
+      </span>
+      <span>
+        <i>L</i>
+        <b data-f="low">{fmtPrice(low(t0))}</b>
+      </span>
+      <span>
+        <i>Vol</i>
+        {volume(symbol)}
+      </span>
+    </div>
+  )
   return (
     <div
       ref={root}
-      className="st-q"
+      className={"st-q" + (live ? " go-live" : "")}
       data-symbol={symbol}
       data-i={i}
-      data-hidden={rest.hidden || undefined}
       data-dir={dirOf(t0)}
-      data-hot={hot || undefined}
+      data-strip={box.strip}
+      onClick={
+        live
+          ? (ev) => {
+              ev.stopPropagation()
+              onPick(i)
+            }
+          : undefined
+      }
+      onDoubleClick={
+        live
+          ? (ev) => {
+              ev.stopPropagation()
+              onActivate(symbol)
+            }
+          : undefined
+      }
       style={
         {
-          "--o": 0,
-          "--h": 0,
+          left: L.x,
+          width: L.w,
+          "--y": rest.y,
+          "--h": rest.h,
+          "--e": 0,
+          "--c": 0,
           "--hot": 0,
           "--tick": 0,
-          "--x0": rest.x,
-          "--y0": rest.y,
-          "--w0": rest.w,
-          "--h0": rest.h,
-          "--x1": slot.x,
-          "--y1": slot.y,
-          "--w1": slot.w,
-          "--h1": slot.h,
-          "--rot": slot.rot,
-          "--op0": rest.hidden ? 0 : 1,
-          "--lift": lift,
-          zIndex: chart ? 30 : 20 + order,
+          "--replay": 1,
         } as React.CSSProperties
       }
     >
-      <GlassSheet className="st-sheet" />
-
-      {/* at rest: printed on the pane */}
-      {rest.hidden ? null : L.restFace === "hero" ? (
-        <div className="st-face st-rest st-hero" style={{ width: rest.w, height: rest.h }}>
-          <span className="st-sym">{display(symbol)}</span>
-          <span className="st-name">{t0.name}</span>
-          <Spark source={symbol} w={L.restSpark.w} h={L.restSpark.h} className="st-hero-spark" />
-          <div className="st-hero-foot">
-            {price("st-hero-price")}
-            {pill}
-          </div>
-        </div>
-      ) : (
-        <div className="st-face st-rest st-rowline" data-first={i === 0 || undefined} style={{ width: rest.w, height: rest.h }}>
-          <div className="st-id">
+      {L.hero ? (
+        <>
+          <div className="st-face st-rest st-hero" style={{ width: 170, height: 170 }}>
             <span className="st-sym">{display(symbol)}</span>
             <span className="st-name">{t0.name}</span>
+            <Spark source={symbol} w={L.restSpark.w} h={L.restSpark.h} className="st-replay st-hero-spark" />
+            <div className="st-hero-foot">
+              {price("st-hero-price")}
+              {pill}
+            </div>
           </div>
-          <Spark source={symbol} w={L.restSpark.w} h={L.restSpark.h} />
-          <div className="st-px">
-            {price("st-price")}
-            {pill}
+          <div className="st-face st-chart st-chart-hero" style={{ width: 170, height: 170 }}>
+            <div className="st-chart-top">
+              <span className="st-sym">{display(symbol)}</span>
+              {pill}
+            </div>
+            {price("st-hero-price")}
+            <Spark source={symbol} w={L.chart.w} h={L.chart.h} chart className="st-ink" />
+            {ohlv}
           </div>
-        </div>
-      )}
-
-      {/* open: a chart, or a card */}
-      {chart ? (
-        <div className="st-face st-open st-chart" style={{ width: slot.w, height: slot.h }}>
-          <div className="st-chart-head">
+        </>
+      ) : (
+        <>
+          <div className="st-face st-rest st-rowline" data-first={i === 0 || undefined} style={{ height: L.rowH }}>
             <div className="st-id">
               <span className="st-sym">{display(symbol)}</span>
               <span className="st-name">{t0.name}</span>
             </div>
+            <Spark source={symbol} w={L.restSpark.w} h={L.restSpark.h} className="st-replay" />
             <div className="st-px">
               {price("st-price")}
               {pill}
             </div>
           </div>
-          <Spark source={symbol} w={L.chart.w} h={L.chart.h} chart className="st-ink" />
-          <div className="st-ohl go-mono">
-            <span>
-              <i>O</i>
-              {fmtPrice(t0.open)}
-            </span>
-            <span>
-              <i>H</i>
-              <b data-f="high">{fmtPrice(high(t0))}</b>
-            </span>
-            <span>
-              <i>L</i>
-              <b data-f="low">{fmtPrice(low(t0))}</b>
-            </span>
-          </div>
-        </div>
-      ) : (
-        <div className={"st-face st-open st-" + card} style={{ width: slot.w, height: slot.h }}>
-          <div className="st-card-top">
+          <div className="st-face st-strip">
             <span className="st-sym">{display(symbol)}</span>
+            {price("st-price")}
             {pill}
           </div>
-          <div className="st-card-foot">
-            {price("st-price")}
-            {card === "card" ? <Spark source={symbol} w={L.cardSpark.w} h={L.cardSpark.h} className="st-ink" /> : null}
+          <div className="st-face st-chart" style={{ height: L.eh }}>
+            <div className="st-chart-head">
+              <div className="st-id">
+                <span className="st-sym">{display(symbol)}</span>
+                <span className="st-name">{t0.name}</span>
+              </div>
+              <div className="st-px">
+                {price("st-price")}
+                {pill}
+              </div>
+            </div>
+            <Spark source={symbol} w={L.chart.w} h={L.chart.h} chart className="st-ink" />
+            {ohlv}
           </div>
-        </div>
+        </>
       )}
-    </div>
-  )
-}
-
-/** The Desk Index: a line that prints along the bottom (medium) or a card of its own (large). */
-function IndexQuote({ L, open, order }: { L: Layout; open: boolean; order: number }) {
-  const ix = L.index!
-  const key = L.symbols.join(",")
-  const t0 = composite(initialGet, L.symbols)
-  const root = React.useRef<HTMLDivElement>(null)
-  const o = useSpringVar(root, "--o", 0, 160, 15)
-  React.useEffect(() => {
-    const el = root.current
-    if (!el) return
-    return market.subscribe(() => {
-      const t = composite(market.get, key.split(","))
-      el.setAttribute("data-dir", dirOf(t))
-      el.querySelectorAll("[data-f=value]").forEach((n) => (n.textContent = last(t).toFixed(2)))
-      el.querySelectorAll("[data-f=change]").forEach((n) => (n.textContent = fmtPct(pct(t))))
-    })
-  }, [key])
-  const timer = React.useRef(0)
-  const mounted = React.useRef(false)
-  React.useEffect(() => {
-    if (!mounted.current) {
-      mounted.current = true
-      if (!open) return
-    }
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => o(open ? 1 : 0), open ? 60 + order * 70 : 0)
-  }, [open, order, o])
-  React.useEffect(() => () => window.clearTimeout(timer.current), [])
-  return (
-    <div
-      ref={root}
-      className={"st-q st-index" + (ix.card ? " st-index-card" : " st-index-strip")}
-      data-dir={dirOf(t0)}
-      style={
-        {
-          "--o": 0,
-          "--h": 0,
-          "--hot": 0,
-          "--tick": 0,
-          "--x0": ix.rest.x,
-          "--y0": ix.rest.y,
-          "--w0": ix.rest.w,
-          "--h0": ix.rest.h,
-          "--x1": ix.open.x,
-          "--y1": ix.open.y,
-          "--w1": ix.open.w,
-          "--h1": ix.open.h,
-          "--rot": ix.open.rot,
-          "--op0": 0,
-          "--lift": 0,
-          zIndex: 20 + order,
-        } as React.CSSProperties
-      }
-    >
-      {ix.card ? <GlassSheet className="st-sheet" /> : null}
-      <div className="st-face st-open st-index-face" style={{ width: ix.open.w, height: ix.open.h }}>
-        <div className="st-index-text go-mono">
-          <span className="st-index-name">Desk Index</span>
-          <b data-f="value">{last(t0).toFixed(2)}</b>
-          <b data-f="change" className="st-index-change">
-            {fmtPct(pct(t0))}
-          </b>
-        </div>
-        <Spark source={"index:" + key} w={ix.spark.w} h={ix.spark.h} className="st-ink" />
-      </div>
     </div>
   )
 }
@@ -582,10 +557,10 @@ function IndexQuote({ L, open, order }: { L: Layout; open: boolean; order: numbe
 // ---------------------------------------------------------------------------
 // The widget
 
-function Body({ size }: { size: WidgetSize }) {
+function Body({ size, onActivate }: { size: WidgetSize; onActivate: (symbol: string) => void }) {
   const L = LAYOUT[size]
-  const { hover, focused, open, rootRef } = useGlass()
-  const up = hover || focused
+  const { open, rootRef } = useGlass()
+  const wrap = React.useRef<HTMLDivElement>(null)
   const liquid = React.useRef<LiquidHandle>(null)
   const [hot, setHot] = React.useState(-1)
   const [focus, setFocus] = React.useState(0)
@@ -594,19 +569,24 @@ function Body({ size }: { size: WidgetSize }) {
     openRef.current = open
   }, [open])
 
-  // which quote is under the pointer; the one that opens into the chart is frozen at the click
+  const expand = useSpringVar(wrap, "--expand", 0, SPRING.k, SPRING.c)
+  const band = useSpringVar(wrap, "--row-hl", L.top, 180, 18)
+  const bandH = useSpringVar(wrap, "--row-hl-h", L.rowH, 180, 18)
+  const bandO = useSpringVar(wrap, "--hl-o", 0, 160, 20)
+  React.useEffect(() => expand(open ? 1 : 0), [open, expand])
+
+  // which row is under the pointer; while closed it is also the one a click expands
   React.useEffect(() => {
     const el = rootRef.current
     if (!el) return
     const move = (e: PointerEvent) => {
       let at = -1
-      for (const q of el.querySelectorAll<HTMLElement>(".st-q[data-symbol]:not([data-hidden])")) {
+      for (const q of el.querySelectorAll<HTMLElement>(".st-q[data-i]")) {
         const b = q.getBoundingClientRect()
         if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom) at = Number(q.dataset.i)
       }
-      if (openRef.current) return
       setHot(at)
-      if (at >= 0) setFocus(at)
+      if (at >= 0 && !openRef.current) setFocus(at)
     }
     const leave = () => setHot(-1)
     el.addEventListener("pointermove", move)
@@ -620,13 +600,29 @@ function Body({ size }: { size: WidgetSize }) {
   // the liquid stirs on every tick
   React.useEffect(() => onTick(() => liquid.current?.energy(1.7)), [])
 
-  const n = L.symbols.length
-  const order = [focus, ...L.symbols.map((_, i) => i).filter((i) => i !== focus)]
-  const visible = L.rest.filter((r) => !r.hidden).length
+  const ex = open ? (L.hero ? 0 : focus) : -1
+  const bs = boxes(L, ex)
+
+  // the highlight band follows the hovered row; not over the expanded chart
+  const hb = hot >= 0 && !L.hero && hot !== ex ? bs[hot] : null
+  React.useEffect(() => {
+    if (!hb) {
+      bandO(0)
+      return
+    }
+    band(hb.y)
+    bandH(hb.h)
+    bandO(1)
+  }, [hb?.y, hb?.h, hb, band, bandH, bandO])
+
   return (
-    <>
-      <Liquid symbols={L.symbols} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 48 : 80} handle={liquid} />
-      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} frost={0.9} radius={22} className="st-pane">
+    <div
+      ref={wrap}
+      className="st-m"
+      style={{ "--expand": 0, "--row-hl": L.top, "--row-hl-h": L.rowH, "--hl-o": 0 } as React.CSSProperties}
+    >
+      <Liquid symbols={L.symbols} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 72 : 120} handle={liquid} />
+      <GlassPane hinge="none" lean={0} openLean={0} frost={0.9} radius={22} className="st-pane">
         {L.header ? (
           <div className="st-head">
             <span className="st-title">Stocks</span>
@@ -637,30 +633,25 @@ function Body({ size }: { size: WidgetSize }) {
           </div>
         ) : null}
       </GlassPane>
-      {L.symbols.map((s, i) => {
-        const k = order.indexOf(i)
-        return (
-          <Quote
-            key={s}
-            symbol={s}
-            i={i}
-            order={k}
-            count={L.rest[i].hidden ? n : visible}
-            rest={L.rest[i]}
-            slot={L.slots[k]}
-            L={L}
-            up={up}
-            open={open}
-            hot={!open && hot === i}
-          />
-        )
-      })}
-      {L.index ? <IndexQuote L={L} open={open} order={n} /> : null}
-    </>
+      {L.hero ? null : <div className="st-band" style={{ left: L.x - 6, width: L.w + 12 }} aria-hidden="true" />}
+      {L.symbols.map((s, i) => (
+        <Row
+          key={s}
+          symbol={s}
+          i={i}
+          L={L}
+          box={bs[i]}
+          hot={hot === i && i !== ex}
+          live={open && !L.hero && i !== ex}
+          onPick={setFocus}
+          onActivate={onActivate}
+        />
+      ))}
+    </div>
   )
 }
 
-/** Remembers where the pointer is so Activate can open the quote under it. */
+/** Remembers where the pointer is so Activate can open the row under it. */
 function PointerPick({ pickRef }: { pickRef: React.RefObject<() => string> }) {
   const { rootRef } = useGlass()
   React.useEffect(() => {
@@ -675,9 +666,7 @@ function PointerPick({ pickRef }: { pickRef: React.RefObject<() => string> }) {
     }
     pickRef.current = () => {
       if (!at) return TOP
-      const qs = Array.from(el.querySelectorAll<HTMLElement>(".st-q[data-symbol]:not([data-hidden])"))
-      if (el.hasAttribute("data-open")) qs.push(...Array.from(el.querySelectorAll<HTMLElement>(".st-q[data-hidden]")))
-      for (const q of qs) {
+      for (const q of el.querySelectorAll<HTMLElement>(".st-q[data-symbol]")) {
         const b = q.getBoundingClientRect()
         if (at.x >= b.left && at.x <= b.right && at.y >= b.top && at.y <= b.bottom) return q.dataset.symbol ?? TOP
       }
@@ -698,6 +687,10 @@ export function StocksWidget({ size = "small", className, appearDelay = 0 }: { s
   const { w, h } = WIDGET[size]
   const pick = React.useRef<() => string>(() => TOP)
   const label = "Stocks: " + LAYOUT[size].symbols.map(display).join(", ")
+  const launch = React.useCallback(
+    (symbol: string) => open("stocks", { singleton: "app", title: "Stocks", w: 820, h: 560, payload: { symbol } }),
+    [open],
+  )
   return (
     <GlassObject
       width={w}
@@ -705,16 +698,17 @@ export function StocksWidget({ size = "small", className, appearDelay = 0 }: { s
       tone={tone}
       label={label}
       radius={22}
-      tilt={size === "large" ? 4 : 5}
+      tilt={2}
+      overflow="hidden"
       appearDelay={appearDelay}
       className={"st-root st-" + size + (className ? " " + className : "")}
-      onActivate={() => open("stocks", { singleton: "app", title: "Stocks", w: 820, h: 560, payload: { symbol: pick.current() } })}
+      onActivate={() => launch(pick.current())}
     >
       <style href="stocks-object" precedence="glass-widget">
         {ST_CSS}
       </style>
       <PointerPick pickRef={pick} />
-      <Body size={size} />
+      <Body size={size} onActivate={launch} />
     </GlassObject>
   )
 }
@@ -723,38 +717,44 @@ const ST_CSS = `
 .st-root { --st-up: #34c759; --st-down: #ff453a; }
 .st-root .go-tilt { border-radius: 22px; }
 .st-root .go-liquid { border-radius: 22px; }
+.st-m { position: absolute; inset: 0; border-radius: 22px; overflow: hidden; }
 .st-root .st-pane { box-shadow: 0 0 0 .5px rgba(0,0,0,.08), inset 0 1px 0 rgba(255,255,255,.6), 0 14px 30px -14px var(--go-shadow); }
 .st-root[data-tone="dark"] .st-pane { box-shadow: 0 0 0 .5px rgba(255,255,255,.1), inset 0 1px 0 rgba(255,255,255,.1), 0 14px 30px -14px var(--go-shadow); }
 
-/* header, on the pane */
-.st-head { position: absolute; left: 16px; right: 16px; top: 12px; display: flex; align-items: baseline; gap: 8px; }
+/* header, on the pane; it makes way for the chart */
+.st-head {
+  position: absolute; left: 16px; right: 16px; top: 12px; display: flex; align-items: baseline; gap: 8px;
+  opacity: clamp(0, 1 - var(--expand) * 2, 1);
+}
 .st-title { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
 .st-status { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--go-ink-soft); }
 .st-status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--st-up); box-shadow: 0 0 0 2px color-mix(in srgb, var(--st-up) 22%, transparent); }
 
-/* a quote: rest box -> open slot along its own spring --o */
+/* the hover band: a soft brightening that slides from row to row */
+.st-band {
+  position: absolute; top: 0; border-radius: 10px; pointer-events: none;
+  transform: translateY(calc(var(--row-hl) * 1px));
+  height: calc(var(--row-hl-h) * 1px);
+  opacity: clamp(0, var(--hl-o), 1);
+  background: linear-gradient(180deg, rgba(255,255,255,.75), rgba(255,255,255,.5));
+  box-shadow: inset 0 0 0 .5px rgba(255,255,255,.9), 0 1px 3px rgba(0,0,0,.05);
+}
+.st-root[data-tone="dark"] .st-band { background: rgba(255,255,255,.07); box-shadow: inset 0 0 0 .5px rgba(255,255,255,.1); }
+
+/* a row: its top and height ride springs; the card itself never changes */
 .st-q {
-  position: absolute; left: 0; top: 0;
-  transform:
-    translate(
-      calc((var(--x0) + (var(--x1) - var(--x0)) * var(--o)) * 1px),
-      calc((var(--y0) + (var(--y1) - var(--y0)) * var(--o)) * 1px - var(--h) * var(--lift) * 1px - var(--hot) * (1 - var(--o)) * 2px))
-    rotate(calc(var(--rot) * var(--o) * 1deg));
-  width: calc((var(--w0) + (var(--w1) - var(--w0)) * var(--o)) * 1px);
-  height: calc((var(--h0) + (var(--h1) - var(--h0)) * var(--o)) * 1px);
-  opacity: clamp(0, var(--op0) + var(--o) * 3, 1);
+  position: absolute; top: 0; overflow: hidden;
+  transform: translateY(calc(var(--y) * 1px));
+  height: calc(var(--h) * 1px);
   color: var(--go-ink);
 }
+.st-q.go-live { cursor: pointer; }
 .st-q[data-dir="up"] { --st-c: var(--st-up); }
 .st-q[data-dir="down"] { --st-c: var(--st-down); }
-.st-root .st-sheet { position: absolute; inset: 0; border-radius: 14px; opacity: clamp(0, var(--o) * 3, 1); }
-.st-small .st-sheet { border-radius: 12px; }
-.st-face { position: absolute; left: 0; top: 0; box-sizing: border-box; }
-.st-rest {
-  opacity: clamp(0, 1 - var(--o) * 2.5, 1);
-  filter: drop-shadow(0 calc(var(--h) * 2px + var(--hot) * 2px) calc(var(--h) * 4px + var(--hot) * 3px) rgba(0,0,0,calc(var(--h) * .12 + var(--hot) * .06)));
-}
-.st-open { opacity: clamp(0, (var(--o) - .3) * 2, 1); }
+.st-face { position: absolute; left: 0; top: 0; right: 0; box-sizing: border-box; }
+.st-rest { opacity: clamp(0, 1 - (var(--e) + var(--c)) * 2.5, 1); }
+.st-chart { opacity: clamp(0, (var(--e) - .35) * 2, 1); }
+.st-strip { opacity: clamp(0, (var(--c) - .4) * 2.5, 1); }
 
 /* type */
 .st-sym { font-size: 13px; font-weight: 600; letter-spacing: -.01em; line-height: 16px; white-space: nowrap; }
@@ -766,19 +766,29 @@ const ST_CSS = `
   color: #fff; background: var(--st-c); font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 
+/* the native row; it shrinks toward a strip as it compresses */
+.st-rowline { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; column-gap: 10px; border-top: .5px solid var(--go-ink-faint); }
+.st-rowline[data-first] { border-top-color: transparent; }
+.st-rowline .st-sym { font-size: calc(13px - var(--c) * 2px); }
+.st-rowline .st-price { font-size: calc(13px - var(--c) * 2px); }
+.st-id { display: flex; flex-direction: column; min-width: 0; }
+.st-px { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+
 /* small: the hero quote */
 .st-hero { display: flex; flex-direction: column; padding: 14px 14px 13px; }
 .st-hero .st-name { margin-top: 1px; }
 .st-hero-spark { margin: auto -2px; }
 .st-hero-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .st-hero-price { font-size: 24px; line-height: 28px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.st-hero .st-pill { min-width: 0; }
+.st-hero .st-pill, .st-chart-hero .st-pill { min-width: 0; }
 
-/* medium, large: a row */
-.st-rowline { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; column-gap: 10px; border-top: .5px solid var(--go-ink-faint); }
-.st-rowline[data-first] { border-top-color: transparent; }
-.st-id { display: flex; flex-direction: column; min-width: 0; }
-.st-px { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+/* a compressed one-line strip */
+.st-strip { height: 100%; display: flex; align-items: center; gap: 8px; border-top: .5px solid var(--go-ink-faint); padding: 0 2px; }
+.st-q[data-strip="0"] .st-strip { border-top-color: transparent; }
+.st-strip .st-sym { font-size: 11px; line-height: 13px; width: 44px; }
+.st-strip .st-price { font-size: 11px; line-height: 13px; margin-left: auto; }
+.st-strip .st-pill { font-size: 10px; line-height: 12px; padding: 1px 4px; min-width: 50px; }
+.st-large .st-strip .st-sym, .st-large .st-strip .st-price { font-size: 11px; }
 
 /* the sparkline */
 .st-spark { display: block; overflow: visible; flex: none; color: var(--st-c); }
@@ -789,41 +799,25 @@ const ST_CSS = `
 .st-dot { fill: currentColor; stroke: rgba(255,255,255,.9); stroke-width: 1; }
 .st-root[data-tone="dark"] .st-dot { stroke: rgba(30,30,32,.9); }
 .st-halo { fill: currentColor; opacity: clamp(0, max(var(--hot) * .35, var(--tick) * .45), .5); transform-box: fill-box; transform-origin: center; transform: scale(calc(.5 + var(--hot) * .5 + var(--tick) * .6)); }
-/* open: the stroke inks itself in */
-.st-ink .st-line { stroke-dasharray: 1 1.01; stroke-linecap: butt; stroke-dashoffset: clamp(0, 1 - (var(--o) - .25) * 1.4, 1); }
-.st-ink .st-area { opacity: clamp(0, (var(--o) - .6) * 2.5, 1); }
-.st-ink .st-dot, .st-ink .st-halo { opacity: clamp(0, (var(--o) - .85) * 6, 1); }
+/* hover: the line redraws from the left */
+.st-replay .st-line { stroke-dasharray: 1 1.01; stroke-linecap: butt; stroke-dashoffset: clamp(0, 1 - var(--replay), 1); }
+.st-replay .st-area { opacity: clamp(0, var(--replay) * 1.4 - .4, 1); }
+/* open: the chart's stroke inks itself in as the row expands */
+.st-ink .st-line { stroke-dasharray: 1 1.01; stroke-linecap: butt; stroke-dashoffset: clamp(0, 1 - (var(--e) - .25) * 1.4, 1); }
+.st-ink .st-area { opacity: clamp(0, (var(--e) - .6) * 2.5, 1); }
+.st-ink .st-dot { opacity: clamp(0, (var(--e) - .85) * 6, 1); }
 
-/* open: the chart */
-.st-chart { display: flex; flex-direction: column; padding: 10px 8px 8px; gap: 4px; }
-.st-chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 0 4px; }
+/* the expanded chart */
+.st-chart { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 2px; }
+.st-chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
 .st-chart .st-spark { margin: auto 0; }
-.st-ohl { display: flex; gap: 10px; font-size: 10px; line-height: 12px; padding: 0 4px; color: var(--go-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.st-ohl { display: flex; gap: 12px; font-size: 10px; line-height: 12px; color: var(--go-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .st-ohl i { font-style: normal; color: var(--go-ink-soft); margin-right: 4px; }
 .st-ohl b { font-weight: 500; }
-.st-small .st-chart { padding: 9px 8px 7px; }
-.st-small .st-chart .st-name { display: none; }
-.st-small .st-chart .st-ohl { gap: 6px; letter-spacing: 0; }
-.st-small .st-chart .st-ohl i { margin-right: 2px; }
-.st-large .st-chart { padding: 12px 10px 10px; }
-
-/* open: a card */
-.st-card, .st-mini { display: flex; flex-direction: column; justify-content: space-between; padding: 8px 10px; }
-.st-card-top, .st-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.st-card .st-pill { min-width: 0; }
-.st-mini { flex-direction: row; align-items: center; padding: 0 3px 0 8px; gap: 6px; }
-.st-mini .st-card-top, .st-mini .st-card-foot { display: contents; }
-.st-mini .st-sym { font-size: 11px; line-height: 13px; order: 0; }
-.st-mini .st-price { font-size: 11px; line-height: 13px; order: 1; margin-left: auto; }
-.st-mini .st-pill { order: 2; min-width: 48px; font-size: 10px; line-height: 12px; padding: 0 4px; }
-.st-small .st-q:not([data-i="0"]) .st-sheet { border-radius: 6px; }
-
-/* the Desk Index */
-.st-index-face { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 2px; }
-.st-index-card .st-index-face { flex-direction: column; align-items: stretch; justify-content: space-between; padding: 8px 10px; gap: 2px; }
-.st-index-text { display: flex; align-items: baseline; gap: 6px; font-size: 10px; line-height: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.st-index-name { color: var(--go-ink-soft); margin-right: auto; }
-.st-index-strip .st-index-name { margin-right: 0; }
-.st-index-change { color: var(--st-c); }
-.st-index .st-spark .st-area { display: none; }
+.st-large .st-chart { padding-top: 4px; gap: 6px; }
+.st-chart-hero { padding: 13px 12px 11px; gap: 0; }
+.st-chart-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.st-chart-hero .st-hero-price { margin-top: 2px; }
+.st-chart-hero .st-ohl { display: grid; grid-template-columns: auto auto; justify-content: space-between; row-gap: 2px; column-gap: 8px; }
+.st-chart-hero .st-ohl i { margin-right: 3px; }
 `
