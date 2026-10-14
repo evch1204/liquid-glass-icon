@@ -156,7 +156,7 @@ export function MenuBar() {
   return (
     <header className="mb-root" data-tone={tone}>
       <style href="glass-menu-bar" precedence="glass-chrome">{MB_CSS}</style>
-      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.pearl} seed={4} cells={160} fps={20} className="mb-liquid" />
+      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.pearl} seed={4} cells={96} fps={10} className="mb-liquid" />
       <span className="mb-glass" aria-hidden="true" />
       <Chip label="Open System Settings" onClick={() => toggleApp("settings")}>
         <Apple className="size-[15px] fill-current" strokeWidth={0} />
@@ -188,7 +188,7 @@ export function MenuBar() {
         </Chip>
       </div>
       <div ref={paneRef} className="mb-pane" data-open={paneOpen || undefined} aria-hidden={!paneOpen}>
-        <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.milk} seed={11} cells={64} fps={20} className="mb-liquid" />
+        <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.milk} seed={11} cells={48} fps={12} className="mb-liquid" />
         <span className="mb-glass" aria-hidden="true" />
         {now ? <MonthPane now={now} /> : null}
       </div>

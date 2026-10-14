@@ -343,7 +343,7 @@ function ClockBody({ size }: { size: WidgetSize }) {
 
   return (
     <>
-      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.pearl} seed={size === "small" ? 2 : size === "medium" ? 5 : 7} cells={size === "small" ? 72 : 120} />
+      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : LIQUIDS.pearl} seed={size === "small" ? 2 : size === "medium" ? 5 : 7} cells={size === "small" ? 48 : 80} />
       <div className="ck-back" aria-hidden="true" />
 
       {/* the card: one frosted pane with the captions on it; it hinges away when opened */}

@@ -625,7 +625,7 @@ function Body({ size }: { size: WidgetSize }) {
   const visible = L.rest.filter((r) => !r.hidden).length
   return (
     <>
-      <Liquid symbols={L.symbols} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 72 : 120} handle={liquid} />
+      <Liquid symbols={L.symbols} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 48 : 80} handle={liquid} />
       <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} frost={0.9} radius={22} className="st-pane">
         {L.header ? (
           <div className="st-head">

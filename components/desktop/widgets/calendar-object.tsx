@@ -528,7 +528,7 @@ function Card({ today, size }: { today: Today | null; size: WidgetSize }) {
 
   return (
     <div ref={wrap} className="cal-body" data-ready={today ? "true" : undefined}>
-      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : PAPER} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 72 : 120} />
+      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : PAPER} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 48 : 80} />
       <GlassPane hinge="bottom" lean={-9} openLean={-18} openShift={6} openFade={0.35} frost={0.9} radius={22} drive={{ open: "--flip" }} className="cal-card">
         {size === "small" ? <SmallList today={today} /> : null}
         {size === "medium" ? <Month today={today} className="cal-month-m" /> : null}

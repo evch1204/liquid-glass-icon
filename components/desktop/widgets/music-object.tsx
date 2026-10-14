@@ -790,7 +790,7 @@ function Small() {
 function Medium() {
   return (
     <Deck size="medium">
-      <Liquid seed={6} cells={120} />
+      <Liquid seed={6} cells={80} />
       <GlassPane {...PANE} frost={0.9} className="mu-pane mu-pane-m">
         <div className="mu-col">
           <NowText album className="mu-now-m" />
@@ -817,7 +817,7 @@ function Medium() {
 function Large() {
   return (
     <Deck size="large">
-      <Liquid seed={9} cells={120} />
+      <Liquid seed={9} cells={80} />
       <GlassPane {...PANE} frost={0.9} className="mu-pane mu-pane-l">
         <Music size={14} strokeWidth={2.2} className="mu-glyph mu-glyph-ink" aria-hidden="true" />
         <NowText album className="mu-now-l" />

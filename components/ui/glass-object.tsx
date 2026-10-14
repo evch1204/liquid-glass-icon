@@ -234,8 +234,8 @@ export function GlassObject({
 
   // ---- springs, integrated on rAF and written as CSS variables -------------
   const springs = React.useRef({
-    px: mk(0, 110, 15),
-    py: mk(0, 110, 15),
+    px: mk(0, 85, 15),
+    py: mk(0, 85, 15),
     vx: mk(0, 160, 20),
     vy: mk(0, 160, 20),
     hover: mk(0, 95, 13),
@@ -338,9 +338,14 @@ export function GlassObject({
     let lastX = 0
     let lastY = 0
     let lastT = 0
+    // the box is read once per entry, not on every move: no layout per frame
+    let rect: DOMRect | null = null
+    const measure = () => {
+      rect = el.getBoundingClientRect()
+    }
     const move = (e: PointerEvent) => {
       if (e.pointerType === "touch") return
-      const r = el.getBoundingClientRect()
+      const r = rect ?? (rect = el.getBoundingClientRect())
       const px = Math.max(-1, Math.min(1, ((e.clientX - r.left) / r.width) * 2 - 1))
       const py = Math.max(-1, Math.min(1, ((e.clientY - r.top) / r.height) * 2 - 1))
       const s = springs.current
@@ -359,8 +364,15 @@ export function GlassObject({
       kick()
     }
     const enter = (e: PointerEvent) => {
-      if (e.pointerType !== "touch") setHover(true)
+      if (e.pointerType === "touch") return
+      measure()
+      setHover(true)
     }
+    const onResize = () => {
+      rect = null
+    }
+    window.addEventListener("resize", onResize)
+    window.addEventListener("scroll", onResize, true)
     const leave = () => {
       setHover(false)
       setPressed(false)
@@ -393,6 +405,8 @@ export function GlassObject({
     el.addEventListener("pointercancel", up)
     return () => {
       window.clearInterval(idle)
+      window.removeEventListener("resize", onResize)
+      window.removeEventListener("scroll", onResize, true)
       el.removeEventListener("pointermove", move)
       el.removeEventListener("pointerenter", enter)
       el.removeEventListener("pointerleave", leave)
@@ -534,8 +548,8 @@ export type LiquidHandle = {
 export function LiquidCanvas({
   recipe = LIQUIDS.milk,
   seed = 1,
-  cells = 72,
-  fps = 30,
+  cells = 48,
+  fps = 24,
   energy = 1,
   ref,
   className,
@@ -666,8 +680,10 @@ export function LiquidCanvas({
     const frame = (now: number) => {
       raf = 0
       if (!visible || document.hidden) return
-      if (now - last >= 1000 / fps) {
-        const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / fps
+      // at rest the liquid idles at a lower rate; it wakes under the hand
+      const f = glass ? (glass.frame.current.hover > 0.02 || glass.frame.current.open > 0.02 || ripple > 0.01 ? fps : Math.min(fps, 10)) : Math.min(fps, 12)
+      if (now - last >= 1000 / f) {
+        const dt = last ? Math.min(0.1, (now - last) / 1000) : 1 / f
         last = now
         ripple *= 0.94
         en += (enTarget - en) * 0.08
@@ -755,9 +771,12 @@ export function GlassPane({
   const shift = `translateY(calc(${op} * ${openShift}px - ${hv} * ${lift}px))`
   const transform =
     hinge === "none" ? shift : `perspective(900px) ${axis}(calc(${hv} * ${lean * sign}deg + ${op} * ${openLean * sign}deg)) ${shift}`
+  // A pane this frosted only ever covers its own liquid, which is already soft,
+  // so a real backdrop blur buys nothing and costs a full-layer blur per frame.
+  const flat = !clear && typeof frost === "number" && frost >= 0.85
   return (
     <div
-      className={"go-pane" + (clear ? " go-pane--clear" : "") + (className ? " " + className : "")}
+      className={"go-pane" + (clear ? " go-pane--clear" : "") + (flat ? " go-pane--flat" : "") + (className ? " " + className : "")}
       style={
         {
           "--pane-radius": typeof radius === "number" ? radius + "px" : radius,
@@ -829,6 +848,8 @@ const GO_CSS = `
   pointer-events: none;
   border-radius: var(--go-radius);
   transform-origin: 50% 50%;
+  will-change: transform;
+  backface-visibility: hidden;
   transform:
     perspective(1200px)
     translateY(calc(var(--go-lift) * -6px))
@@ -880,11 +901,17 @@ const GO_CSS = `
   position: absolute;
   inset: 0;
   border-radius: var(--pane-radius);
+  will-change: transform, opacity;
+  backface-visibility: hidden;
   -webkit-backdrop-filter: blur(calc(14px * var(--pane-frost))) saturate(1.5);
   backdrop-filter: blur(calc(14px * var(--pane-frost))) saturate(1.5);
   box-shadow: 0 0 0 .5px rgba(0, 0, 0, .1), 0 14px 30px -14px var(--go-shadow);
 }
 .go-root[data-tone="dark"] .go-pane { box-shadow: 0 0 0 .5px rgba(255, 255, 255, .12), 0 14px 30px -14px var(--go-shadow); }
+.go-pane--flat { -webkit-backdrop-filter: none; backdrop-filter: none; }
+.go-pane--flat .go-pane-tint {
+  background: linear-gradient(180deg, rgba(var(--go-glass), .72) 0%, rgba(var(--go-glass), .86) 48%, rgba(var(--go-glass), .96) 100%);
+}
 .go-pane-tint {
   position: absolute;
   inset: 0;
@@ -929,6 +956,7 @@ const GO_CSS = `
 .go-sheet {
   position: absolute;
   box-sizing: border-box;
+  will-change: transform;
   border-radius: 14px;
   overflow: hidden;
   background: linear-gradient(180deg, #ffffff 0%, #f2f2f0 100%);

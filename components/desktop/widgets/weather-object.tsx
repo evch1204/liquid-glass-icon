@@ -637,7 +637,7 @@ function Sky({ size, recipe }: { size: WidgetSize; recipe: LiquidRecipe }) {
   return (
     <div ref={ref} className="wo-world">
       <div className="wo-sky" aria-hidden="true">
-        <LiquidCanvas recipe={recipe} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 64 : 110} />
+        <LiquidCanvas recipe={recipe} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 44 : 72} />
       </div>
       <Body size={size} />
     </div>
