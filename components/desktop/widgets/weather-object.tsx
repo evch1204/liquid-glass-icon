@@ -1,16 +1,7 @@
 "use client"
 
 import * as React from "react"
-import {
-  GlassObject,
-  GlassPane,
-  GlassSheet,
-  LIQUIDS,
-  LiquidCanvas,
-  useGlass,
-  useSpringVar,
-  type LiquidRecipe,
-} from "@/components/ui/glass-object"
+import { GlassObject, GlassPane, LIQUIDS, LiquidCanvas, useGlass, useSpringVar, type LiquidRecipe } from "@/components/ui/glass-object"
 import { rng } from "@/components/ui/glass-folder-cards"
 import { WIDGET, type WidgetSize } from "../glass"
 import { useWindowManager } from "../window-manager"
@@ -24,19 +15,21 @@ import { useWindowManager } from "../window-manager"
  * row and a six-day list with range bars.
  *
  * Layers, back to front: the sky as a liquid light (pale sky by day, smoke by
- * night) that casts through a frosted pane hinged on its bottom edge; the
- * current conditions standing in front of the pane, with a real sun, moon and
- * clouds; and a pocket at the bottom holding the forecast.
+ * night) with a time-of-day cast over it and a sun (or moon) on an arc; one
+ * flat frosted pane; the contents, clipped to the card. The card never
+ * changes size or shape and nothing crosses its edge.
  *
- * - **Hover**: the object lifts, the pane leans back, the sun rises 4px and
- *   the clouds part. The sky's light lags the tilt on a slow pendulum
- *   (`--slosh`, k=18 c=2.6, chasing px·hover).
- * - **Open** (click): the pane hinges down and away, the temperature shrinks
- *   toward the top, and the forecast comes up out of the pocket: six hourly
- *   chips, 140ms apart, each caught on an arc by a spring (k=200 c=13) and
- *   squashing a pixel as it lands (small); the right half turns over on its
- *   axle to the five-day outlook (medium, `--plaque`); six day rows rise as
- *   sheets over the list (large). Close reverses it.
+ * - **Hover** scrubs the day: the pointer's x is a time of day (`--scrub`,
+ *   k=60 c=11, chasing px). The sun travels its arc behind the frost, the cast
+ *   turns from dawn-warm through noon-blue to dusk-orange, the big temperature
+ *   shows that hour's forecast with the hour beneath it, and on medium the
+ *   matching hourly column lights. On leave it all eases back to now.
+ * - **Open** (click): the forecast slides in, in frame. The current block
+ *   slides up into a one-line header (`--open`, k=80 c=12); the six-day list
+ *   rises from the bottom edge, row by row 50 ms apart, each bar drawing
+ *   itself (small); the hourly row scrolls on to later hours and a five-day
+ *   column slides in (medium); the day rows open up with hourly strips
+ *   (large). Escape or a click outside puts the native layout back.
  * - **Activate** (double-click, Enter): the Weather app.
  *
  * The numbers are the Weather app's: Cupertino, 54° to 72°, the same hourly
@@ -291,132 +284,167 @@ function SkyGlyph({ condition, className }: { condition: Condition; className: s
 }
 
 // ---------------------------------------------------------------------------
-// The pocket: forecast pieces that rise out of the bottom edge and are caught
-// by a spring in their slots. One rAF loop, written straight to the DOM.
+// The scrub: the pointer's x is a time of day. By day the arc runs 6 AM → 8 PM,
+// by night 6 PM → 6 AM. At rest the spring sits on the current hour.
 
-type Slot = { x: number; y: number; r: number }
+const ARC = { day: { from: 6, span: 14 }, night: { from: 18, span: 12 } }
 
-/** Slots on the lower arc of a circle, each tilted to `lean` of the tangent. */
-function arcSlots(cx: number, cy: number, r: number, from: number, to: number, n: number, lean: number): Slot[] {
-  const r2 = (v: number) => Math.round(v * 100) / 100
-  return Array.from({ length: n }, (_, i) => {
-    const a = ((from + ((to - from) * i) / (n - 1)) * Math.PI) / 180
-    const tangent = (Math.atan2(-Math.cos(a), -Math.sin(a)) * 180) / Math.PI
-    return { x: r2(cx + r * Math.cos(a)), y: r2(cy - r * Math.sin(a)), r: r2(tangent * lean) }
-  })
+function scrubOf(minutes: number, night: boolean) {
+  const a = night ? ARC.night : ARC.day
+  const since = (((minutes / 60 - a.from) % 24) + 24) % 24
+  return Math.max(-1, Math.min(1, (since / a.span) * 2 - 1))
 }
 
-type Pocket = { w: number; h: number; slots: Slot[]; /** stagger between pieces, ms */ gap: number; /** where they wait, below the edge */ from: number }
-
-const POCKETS: Record<"small" | "large", Pocket> = {
-  // six 26×40 chips on an arc of r=74 about (85, 50), between 220° and 320°
-  small: { w: 26, h: 40, slots: arcSlots(85, 50, 74, 220, 320, 6, 0.4), gap: 140, from: 200 },
-  // six day rows, Today on top
-  large: { w: 340, h: 26, slots: Array.from({ length: 6 }, (_, i) => ({ x: 182, y: 186 + i * 28, r: 0 })), gap: 70, from: 400 },
+function hourOf(s: number, night: boolean) {
+  const a = night ? ARC.night : ARC.day
+  return (Math.round(a.from + ((s + 1) / 2) * a.span) + 24) % 24
 }
 
-const pieceTransform = (x: number, y: number, w: number, h: number, r: number, sq: number) =>
-  `translate(${(x - w / 2).toFixed(2)}px, ${(y - h / 2).toFixed(2)}px) rotate(${r.toFixed(2)}deg) scale(1, ${(1 - sq / h).toFixed(4)})`
+const fmtHourSpaced = (h: number) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`
 
-type Piece = { x: number; y: number; vx: number; vy: number; rot: number; rv: number; o: number; ov: number; sq: number; sqv: number; up: boolean; at: number; landed: boolean }
-
-function usePocket(P: Pocket | null, els: React.RefObject<(HTMLDivElement | null)[]>, open: boolean) {
-  const first = React.useRef(true)
-  const state = React.useRef<{ ps: Piece[]; raf: number; last: number } | null>(null)
+/**
+ * `--scrub` (k=60 c=11) chases the pointer's x while hovering and eases back
+ * to the current hour on leave. The big temperature, the hour label and the
+ * hourly row's highlight are written straight to the DOM when the hour
+ * changes, so nothing re-renders per frame.
+ */
+function useScrub(worldRef: React.RefObject<HTMLDivElement | null>, now: Now) {
+  const { onFrame, frame, hover, open } = useGlass()
+  const rest = scrubOf(now.clock.minutes, now.night)
+  const live = React.useRef({ hover, open, rest, night: now.night })
+  const kickRef = React.useRef<() => void>(() => {})
   React.useEffect(() => {
-    if (!P) return
+    live.current = { hover, open, rest, night: now.night }
+    kickRef.current()
+  }, [hover, open, rest, now.night])
+  React.useEffect(() => {
+    const world = worldRef.current
+    if (!world) return
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
-    if (!state.current) {
-      state.current = {
-        ps: P.slots.map((s) => ({ x: s.x, y: P.from, vx: 0, vy: 0, rot: 0, rv: 0, o: 0, ov: 0, sq: 0, sqv: 0, up: false, at: 0, landed: false })),
-        raf: 0,
-        last: 0,
+    const temp = world.querySelector<HTMLElement>(".wo-temp")
+    const tempScrub = world.querySelector<HTMLElement>(".wo-t-scrub")
+    const label = world.querySelector<HTMLElement>(".wo-hour-label")
+    const cols = Array.from(world.querySelectorAll<HTMLElement>("[data-h]"))
+    let s = live.current.rest
+    let v = 0
+    // how much we are scrubbing: the pointer is over it (focus alone does not count)
+    let on = 0
+    let onV = 0
+    let raf = 0
+    let last = 0
+    let shown = ""
+    const write = () => {
+      world.style.setProperty("--scrub", s.toFixed(4))
+      world.style.setProperty("--scrub-on", on.toFixed(4))
+      const L = live.current
+      const scrubbing = (L.hover && !L.open) || Math.abs(s - L.rest) > 0.04
+      const h = hourOf(s, L.night)
+      const key = scrubbing ? String(h) : ""
+      if (key === shown) return
+      shown = key
+      temp?.setAttribute("data-scrub", scrubbing ? "1" : "0")
+      if (scrubbing) {
+        if (tempScrub) tempScrub.textContent = String(tempAt(h))
+        if (label) label.textContent = fmtHourSpaced(h)
       }
+      cols.forEach((c) => c.toggleAttribute("data-on", scrubbing && Number(c.dataset.h) === h))
     }
-    const st = state.current
+    const step = (t: number) => {
+      raf = 0
+      const dt = last ? Math.min(1 / 30, (t - last) / 1000) : 1 / 60
+      last = t
+      const L = live.current
+      const active = L.hover && !L.open
+      const target = active ? frame.current.px : L.rest
+      const onT = active ? 1 : 0
+      if (reduce) {
+        s = target
+        v = 0
+        on = onT
+        onV = 0
+      } else {
+        v += (-60 * (s - target) - 11 * v) * dt
+        s += v * dt
+        onV += (-95 * (on - onT) - 13 * onV) * dt
+        on += onV * dt
+      }
+      const moving = Math.abs(s - target) > 0.0008 || Math.abs(v) > 0.0008 || Math.abs(on - onT) > 0.001 || Math.abs(onV) > 0.001
+      if (!moving) {
+        s = target
+        v = 0
+        on = onT
+        onV = 0
+      }
+      write()
+      if (moving) raf = requestAnimationFrame(step)
+      else last = 0
+    }
+    const kick = () => {
+      if (!raf) raf = requestAnimationFrame(step)
+    }
+    kickRef.current = kick
+    write()
+    const off = onFrame(kick)
+    return () => {
+      off()
+      cancelAnimationFrame(raf)
+      kickRef.current = () => {}
+    }
+  }, [worldRef, onFrame, frame])
+}
+
+/**
+ * Rows that come in one after another: each gets its own spring (k=80 c=12),
+ * started 50 ms after the one before, written to the row as `--r`.
+ */
+function useRows(els: React.RefObject<(HTMLElement | null)[]>, count: number, open: boolean) {
+  const first = React.useRef(true)
+  const st = React.useRef<{ r: number[]; v: number[]; at: number[]; raf: number; last: number } | null>(null)
+  React.useEffect(() => {
+    if (!st.current) st.current = { r: Array(count).fill(0), v: Array(count).fill(0), at: Array(count).fill(0), raf: 0, last: 0 }
+    const S = st.current
     if (first.current) {
       first.current = false
       if (!open) return
     }
-    const n = P.slots.length
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+    const target = open ? 1 : 0
     const now = performance.now()
-    st.ps.forEach((p, i) => {
-      p.up = open
-      p.landed = false
-      // up: one by one; down: all together, the last one first
-      p.at = now + (open ? 120 + i * P.gap : (n - 1 - i) * 30)
-    })
+    for (let i = 0; i < count; i++) S.at[i] = now + (open ? i * 50 : (count - 1 - i) * 25)
     const write = () => {
-      st.ps.forEach((p, i) => {
-        const el = els.current[i]
-        if (!el) return
-        el.style.transform = pieceTransform(p.x, p.y, P.w, P.h, p.rot, Math.max(-1.5, Math.min(1.5, p.sq)))
-        el.style.opacity = Math.max(0, Math.min(1, p.o)).toFixed(3)
-      })
+      for (let i = 0; i < count; i++) els.current[i]?.style.setProperty("--r", S.r[i].toFixed(4))
     }
     if (reduce) {
-      st.ps.forEach((p, i) => {
-        const s = P.slots[i]
-        p.x = s.x
-        p.y = open ? s.y : P.from
-        p.rot = open ? s.r : 0
-        p.o = open ? 1 : 0
-      })
+      S.r.fill(target)
       write()
       return
     }
     const step = (t: number) => {
-      const dt = st.last ? Math.min(1 / 30, (t - st.last) / 1000) : 1 / 60
-      st.last = t
+      const dt = S.last ? Math.min(1 / 30, (t - S.last) / 1000) : 1 / 60
+      S.last = t
       let active = false
-      st.ps.forEach((p, i) => {
-        const s = P.slots[i]
-        if (t < p.at) {
+      for (let i = 0; i < count; i++) {
+        if (t < S.at[i]) {
           active = true
-          return
+          continue
         }
-        // caught by a stiff, bouncy spring on the way up; let go more softly on the way down
-        const k = p.up ? 200 : 170
-        const c = p.up ? 13 : 22
-        const ty = p.up ? s.y : P.from
-        const tr = p.up ? s.r : 0
-        const prevY = p.y
-        p.vx += (-k * (p.x - s.x) - c * p.vx) * dt
-        p.vy += (-k * (p.y - ty) - c * p.vy) * dt
-        p.x += p.vx * dt
-        p.y += p.vy * dt
-        p.rv += (-k * (p.rot - tr) - c * p.rv) * dt
-        p.rot += p.rv * dt
-        p.ov += (-260 * (p.o - (p.up ? 1 : 0)) - 32 * p.ov) * dt
-        p.o += p.ov * dt
-        if (p.up && !p.landed && prevY > s.y && p.y <= s.y) {
-          // it overshoots its slot and drops back into it: a pixel of squash
-          p.landed = true
-          p.sqv += Math.min(34, Math.max(14, -p.vy * 0.08))
-        }
-        p.sqv += (-600 * p.sq - 30 * p.sqv) * dt
-        p.sq += p.sqv * dt
-        const moving =
-          Math.abs(p.y - ty) + Math.abs(p.vy) + Math.abs(p.rot - tr) + Math.abs(p.rv) > 0.02 ||
-          Math.abs(p.sq) + Math.abs(p.sqv) > 0.01 ||
-          Math.abs(p.o - (p.up ? 1 : 0)) + Math.abs(p.ov) > 0.004
-        if (moving) active = true
+        S.v[i] += (-80 * (S.r[i] - target) - 12 * S.v[i]) * dt
+        S.r[i] += S.v[i] * dt
+        if (Math.abs(S.r[i] - target) > 0.0008 || Math.abs(S.v[i]) > 0.0008) active = true
         else {
-          p.y = ty
-          p.rot = tr
-          p.vy = p.rv = p.sq = p.sqv = p.ov = 0
-          p.o = p.up ? 1 : 0
+          S.r[i] = target
+          S.v[i] = 0
         }
-      })
+      }
       write()
-      st.raf = active ? requestAnimationFrame(step) : 0
-      if (!st.raf) st.last = 0
+      S.raf = active ? requestAnimationFrame(step) : 0
+      if (!S.raf) S.last = 0
     }
-    if (!st.raf) st.raf = requestAnimationFrame(step)
-  }, [P, els, open])
+    if (!S.raf) S.raf = requestAnimationFrame(step)
+  }, [els, count, open])
   React.useEffect(
     () => () => {
-      if (state.current) cancelAnimationFrame(state.current.raf)
+      if (st.current) cancelAnimationFrame(st.current.raf)
     },
     [],
   )
@@ -430,17 +458,9 @@ type Now = { temp: number; night: boolean; condition: Condition; clock: Clock }
 function Temp({ now }: { now: Now }) {
   return (
     <div className="wo-temp">
-      {now.temp}
+      <span className="wo-t-now">{now.temp}</span>
+      <span className="wo-t-scrub" />
       <span className="wo-deg">°</span>
-    </div>
-  )
-}
-
-function City() {
-  return (
-    <div className="wo-city">
-      {CITY}
-      <Arrow />
     </div>
   )
 }
@@ -459,11 +479,11 @@ function RangeBar({ lo, hi, min, max, dot }: { lo: number; hi: number; min: numb
   )
 }
 
-function HourRow({ hours }: { hours: Hour[] }) {
+function HourRow({ hours, className }: { hours: Hour[]; className?: string }) {
   return (
-    <ul className="wo-hours">
+    <ul className={"wo-hours" + (className ? " " + className : "")}>
       {hours.map((h) => (
-        <li key={h.key} className="wo-hour">
+        <li key={h.key} className="wo-hour" data-h={((Number(h.key.slice(1)) % 24) + 24) % 24}>
           <span className="wo-hour-t">{h.label}</span>
           <Glyph condition={h.condition} size={18} />
           <span className="wo-hour-v">{h.temp}°</span>
@@ -485,173 +505,181 @@ function DayRow({ d, min, max, night, dot }: { d: Day; min: number; max: number;
   )
 }
 
-/** The current conditions: in front of the pane, so they stay when it hinges away. */
+/** The native current block. Open slides it up and away inside the card. */
 function Current({ now }: { now: Now }) {
   return (
-    <>
-      <City />
+    <div className="wo-current">
+      <div className="wo-city">
+        {CITY}
+        <Arrow />
+      </div>
       <Temp now={now} />
+      <div className="wo-hour-label" aria-hidden="true" />
       <SkyGlyph condition={now.condition} className="wo-now-glyph" />
-    </>
-  )
-}
-
-/** Printed on the pane: hinges away with it. */
-function Summary({ now }: { now: Now }) {
-  return (
-    <div className="wo-summary">
-      <span className="wo-cond">{LABEL[now.condition]}</span>
-      <span className="wo-hl go-mono">
-        H:{HI}° L:{LO}°
-      </span>
+      <div className="wo-summary">
+        <span className="wo-cond">{LABEL[now.condition]}</span>
+        <span className="wo-hl go-mono">
+          H:{HI}° L:{LO}°
+        </span>
+      </div>
     </div>
   )
 }
 
+/** What the current block compresses to when open: one line. */
+function Header({ now }: { now: Now }) {
+  return (
+    <div className="wo-header" aria-hidden="true">
+      <span className="wo-header-city">{CITY}</span>
+      <span className="wo-header-dot">·</span>
+      <span className="wo-header-temp">{now.temp}°</span>
+      <span className="wo-header-dot">·</span>
+      <span className="wo-header-cond">{LABEL[now.condition]}</span>
+    </div>
+  )
+}
+
+function useDays(now: Now, count: number) {
+  const days = forecast(now.clock, count)
+  return { days, min: Math.min(...days.map((d) => d.lo)), max: Math.max(...days.map((d) => d.hi)) }
+}
+
 function Small({ now, open }: { now: Now; open: boolean }) {
-  const hours = hourly(now.clock, 6)
-  const els = React.useRef<(HTMLDivElement | null)[]>([])
-  const P = POCKETS.small
-  usePocket(P, els, open)
+  const { days, min, max } = useDays(now, 6)
+  const rows = React.useRef<(HTMLElement | null)[]>([])
+  useRows(rows, days.length, open)
   return (
     <>
-      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} radius={22} frost={0.9} className="wo-pane">
-        <Summary now={now} />
-      </GlassPane>
-      <div className="wo-front">
-        <Current now={now} />
-      </div>
-      <div className="wo-pocket" aria-hidden="true">
-        {hours.map((h, i) => (
-          <div
-            key={h.key}
+      <Current now={now} />
+      <Header now={now} />
+      <ul className="wo-list wo-list-small" aria-hidden="true">
+        {days.map((d, i) => (
+          <li
+            key={d.key}
             ref={(el) => {
-              els.current[i] = el
+              rows.current[i] = el
             }}
-            className="wo-chip"
-            // the tops lean together: the outer chips lie over the inner ones
-            style={{ width: P.w, height: P.h, opacity: 0, zIndex: i < 3 ? 6 - i : i, transform: pieceTransform(P.slots[i].x, P.from, P.w, P.h, 0, 0) }}
+            className="wo-row wo-row-in"
+            style={{ top: 38 + i * 21 } as React.CSSProperties}
           >
-            <span className="wo-chip-t">{h.label}</span>
-            <Glyph condition={h.condition} size={14} />
-            <span className="wo-chip-v">{h.temp}°</span>
-          </div>
+            <DayRow d={d} min={min} max={max} night={now.night} dot={i === 0 ? now.temp : undefined} />
+          </li>
         ))}
-      </div>
+      </ul>
     </>
   )
 }
 
-function Medium({ now }: { now: Now }) {
-  const hours = hourly(now.clock, 6)
-  const days = forecast(now.clock, 6).slice(1)
+function Medium({ now, open }: { now: Now; open: boolean }) {
+  const hours = hourly(now.clock, 12)
+  const { days, min, max } = useDays(now, 6)
+  const rows = React.useRef<(HTMLElement | null)[]>([])
+  useRows(rows, 5, open)
   return (
     <>
-      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} radius={22} frost={0.9} className="wo-pane">
-        <Summary now={now} />
-      </GlassPane>
-      <div className="wo-front">
-        <Current now={now} />
-        {/* the right half turns over on a horizontal axle */}
-        <div className="wo-flip" aria-hidden="true">
-          <div className="wo-spin">
-            <div className="wo-face wo-face-front">
-              <HourRow hours={hours} />
-            </div>
-            <div className="wo-face wo-face-back">
-              <ul className="wo-hours wo-days">
-                {days.map((d) => (
-                  <li key={d.key} className="wo-hour">
-                    <span className="wo-hour-t wo-day-t">{d.label}</span>
-                    <Glyph condition={d.condition} size={18} />
-                    <span className="wo-hour-v">
-                      {d.hi}°<span className="wo-day-lo">{d.lo}°</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
+      <Current now={now} />
+      <Header now={now} />
+      {/* the hourly row scrolls along to the later hours */}
+      <div className="wo-hourly-medium">
+        <HourRow hours={hours} className="wo-track" />
       </div>
+      <ul className="wo-list wo-list-medium" aria-hidden="true">
+        {days.slice(1).map((d, i) => (
+          <li
+            key={d.key}
+            ref={(el) => {
+              rows.current[i] = el
+            }}
+            className="wo-row wo-row-in"
+            style={{ top: 42 + i * 23 } as React.CSSProperties}
+          >
+            <DayRow d={d} min={min} max={max} night={now.night} />
+          </li>
+        ))}
+      </ul>
     </>
+  )
+}
+
+/** A tiny hourly strip for one day: the curve shifted to that day's high. */
+function MiniStrip({ d }: { d: Day }) {
+  const shift = d.hi - HI
+  return (
+    <div className="wo-mini go-mono">
+      {[6, 9, 12, 15, 18, 21].map((h) => (
+        <span key={h}>
+          <i>{h === 12 ? "12P" : h < 12 ? h + "A" : h - 12 + "P"}</i>
+          {tempAt(h) + shift}°
+        </span>
+      ))}
+    </div>
   )
 }
 
 function Large({ now, open }: { now: Now; open: boolean }) {
   const hours = hourly(now.clock, 6)
-  const days = forecast(now.clock, 6)
-  const min = Math.min(...days.map((d) => d.lo))
-  const max = Math.max(...days.map((d) => d.hi))
-  const els = React.useRef<(HTMLDivElement | null)[]>([])
-  const P = POCKETS.large
-  usePocket(P, els, open)
+  const { days, min, max } = useDays(now, 6)
+  const rows = React.useRef<(HTMLElement | null)[]>([])
+  useRows(rows, days.length, open)
   return (
     <>
-      <GlassPane hinge="bottom" lean={-9} openLean={-70} openShift={14} openFade={0.8} radius={22} frost={0.9} className="wo-pane">
-        <Summary now={now} />
-        <ul className="wo-list">
-          {days.map((d, i) => (
-            <li key={d.key} className="wo-row">
-              <DayRow d={d} min={min} max={max} night={now.night} dot={i === 0 ? now.temp : undefined} />
-            </li>
-          ))}
-        </ul>
-      </GlassPane>
-      <div className="wo-front">
-        <Current now={now} />
-        <div className="wo-hourly-large">
-          <HourRow hours={hours} />
-        </div>
+      <Current now={now} />
+      <Header now={now} />
+      <div className="wo-hourly-large">
+        <HourRow hours={hours} />
       </div>
-      <div className="wo-pocket" aria-hidden="true">
+      <ul className="wo-list wo-list-large">
         {days.map((d, i) => (
-          <div
+          <li
             key={d.key}
             ref={(el) => {
-              els.current[i] = el
+              rows.current[i] = el
             }}
-            className="wo-sheet-slot"
-            style={{ width: P.w, height: P.h, opacity: 0, transform: pieceTransform(P.slots[i].x, P.from, P.w, P.h, 0, 0) }}
+            className="wo-row wo-row-grow"
+            // rest: a 28px list under the hourly row; open: 52px rows from the header down
+            style={{ top: 172 + i * 28, "--dy": -128 + i * 24 + "px" } as React.CSSProperties}
           >
-            <GlassSheet className="wo-sheet">
-              <DayRow d={d} min={min} max={max} night={now.night} dot={i === 0 ? now.temp : undefined} />
-            </GlassSheet>
-          </div>
+            <DayRow d={d} min={min} max={max} night={now.night} dot={i === 0 ? now.temp : undefined} />
+            <MiniStrip d={d} />
+          </li>
         ))}
-      </div>
+      </ul>
     </>
   )
 }
 
-/** The sky light behind the pane; its light lags the tilt on a slow pendulum. */
-function Sky({ size, recipe }: { size: WidgetSize; recipe: LiquidRecipe }) {
-  const { onFrame, open } = useGlass()
-  const ref = React.useRef<HTMLDivElement>(null)
-  const slosh = useSpringVar(ref, "--slosh", 0, 18, 2.6)
-  const plaque = useSpringVar(ref, "--plaque", 0, 110, 12)
-  React.useEffect(() => onFrame((f) => slosh(f.px * f.hover)), [onFrame, slosh])
-  React.useEffect(() => {
-    plaque(open ? 1 : 0, { delay: open ? 120 : 0 })
-  }, [open, plaque])
-  return (
-    <div ref={ref} className="wo-world">
-      <div className="wo-sky" aria-hidden="true">
-        <LiquidCanvas recipe={recipe} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 44 : 72} />
-      </div>
-      <Body size={size} />
-    </div>
-  )
+/** The arc the sun (or moon) travels while you scrub; behind the frost. */
+function ArcBody({ night }: { night: boolean }) {
+  return <div className={night ? "wo-arc wo-arc-moon" : "wo-arc wo-arc-sun"} aria-hidden="true" />
 }
 
-// the body reads open from the engine; `now` comes down through context
+// `now` comes down through context so the hooks below share one source
 const NowCtx = React.createContext<Now | null>(null)
 
-function Body({ size }: { size: WidgetSize }) {
-  const now = React.useContext(NowCtx)
+function World({ size, recipe }: { size: WidgetSize; recipe: LiquidRecipe }) {
+  const now = React.useContext(NowCtx) as Now
   const { open } = useGlass()
-  if (!now) return null
-  return size === "small" ? <Small now={now} open={open} /> : size === "medium" ? <Medium now={now} /> : <Large now={now} open={open} />
+  const ref = React.useRef<HTMLDivElement>(null)
+  const openSpring = useSpringVar(ref, "--open", 0, 80, 12)
+  React.useEffect(() => {
+    openSpring(open ? 1 : 0)
+  }, [open, openSpring])
+  useScrub(ref, now)
+  return (
+    <div ref={ref} className="wo-world" style={{ "--scrub": scrubOf(now.clock.minutes, now.night).toFixed(4) } as React.CSSProperties}>
+      <div className="wo-sky" aria-hidden="true">
+        <LiquidCanvas recipe={recipe} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 64 : 110} />
+        <div className="wo-cast wo-cast-a" />
+        <div className="wo-cast wo-cast-b" />
+        <div className="wo-cast wo-cast-c" />
+        <ArcBody night={now.night} />
+      </div>
+      <GlassPane hinge="none" lean={0} openLean={0} radius={22} frost={0.9} className="wo-pane" />
+      <div className="wo-clip">
+        {size === "small" ? <Small now={now} open={open} /> : size === "medium" ? <Medium now={now} open={open} /> : <Large now={now} open={open} />}
+      </div>
+    </div>
+  )
 }
 
 export function WeatherWidget({ size = "small", className, appearDelay = 0 }: { size?: WidgetSize; className?: string; appearDelay?: number }) {
@@ -671,6 +699,7 @@ export function WeatherWidget({ size = "small", className, appearDelay = 0 }: { 
       tone={glassTone}
       label="Weather"
       radius={24}
+      tilt={2}
       appearDelay={appearDelay}
       className={"wo-root wo-" + size + (night ? " wo-night" : "") + (clock.ready ? "" : " wo-wait") + (className ? " " + className : "")}
       onActivate={() => open("weather", { singleton: "app", title: "Weather", w: 720, h: 520 })}
@@ -678,7 +707,7 @@ export function WeatherWidget({ size = "small", className, appearDelay = 0 }: { 
       <style href="weather-object" precedence="glass-widget">{WO_CSS}</style>
       <div className="wo-back" aria-hidden="true" />
       <NowCtx.Provider value={now}>
-        <Sky size={size} recipe={recipe} />
+        <World size={size} recipe={recipe} />
       </NowCtx.Provider>
     </GlassObject>
   )
@@ -688,18 +717,46 @@ const WO_CSS = `
 .wo-root .go-tilt { border-radius: 24px; }
 .wo-back { position: absolute; inset: 0; border-radius: 24px; box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 0 0 .5px rgba(0,0,0,.1); }
 .wo-root[data-tone="dark"] .wo-back { box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 0 0 .5px rgba(255,255,255,.1); }
-.wo-wait .wo-front, .wo-wait .go-pane-body, .wo-wait .wo-pocket { visibility: hidden; }
+.wo-wait .wo-clip { visibility: hidden; }
 
-.wo-world { position: absolute; inset: 0; --slosh: 0; --slosh-v: 0; --plaque: 0; --plaque-v: 0; }
+.wo-world { position: absolute; inset: 0; --open: 0; --open-v: 0; --scrub-on: 0; }
+/* everything moves inside the card: nothing crosses its edge */
+.wo-clip { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; }
 
-/* the sky light: it lags the tilt, so the cast through the frost moves like liquid */
+/* the sky light, and the time of day cast over it as you scrub */
 .wo-sky { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; }
-.wo-sky .go-liquid {
-  border-radius: 0;
-  transform: translate(calc(var(--slosh) * -9px), calc(var(--go-py) * -3px * var(--go-hover))) scale(1.12);
+.wo-sky .go-liquid { border-radius: 0; }
+.wo-cast { position: absolute; inset: 0; }
+/* dawn-warm at the left end of the arc, noon-blue in the middle, dusk-orange at the right */
+.wo-cast-a {
+  background: radial-gradient(120% 90% at 0% 100%, rgba(255,186,140,.85), rgba(255,214,170,.35) 55%, rgba(255,220,180,0) 80%);
+  opacity: calc(clamp(0, calc(var(--scrub) * -1), 1) * (.35 + var(--scrub-on) * .65));
 }
+.wo-cast-b {
+  background: radial-gradient(120% 90% at 50% 0%, rgba(120,175,255,.6), rgba(150,195,255,.2) 60%, rgba(150,195,255,0) 85%);
+  opacity: calc((1 - max(var(--scrub), calc(var(--scrub) * -1))) * (.3 + var(--scrub-on) * .7));
+}
+.wo-cast-c {
+  background: radial-gradient(120% 90% at 100% 100%, rgba(255,140,70,.85), rgba(255,170,110,.35) 55%, rgba(255,170,110,0) 80%);
+  opacity: calc(clamp(0, var(--scrub), 1) * (.35 + var(--scrub-on) * .65));
+}
+.wo-night .wo-cast-a, .wo-night .wo-cast-c { background: radial-gradient(120% 90% at 0% 100%, rgba(140,100,190,.6), rgba(140,100,190,0) 75%); }
+.wo-night .wo-cast-c { background: radial-gradient(120% 90% at 100% 100%, rgba(120,110,200,.6), rgba(120,110,200,0) 75%); }
+.wo-night .wo-cast-b { background: radial-gradient(120% 90% at 50% 0%, rgba(60,90,170,.55), rgba(60,90,170,0) 80%); }
 
-/* the pane: frosted, but thin enough that the sky's cast comes through */
+/* the sun on its arc: x follows the scrub, y the square of it */
+.wo-arc {
+  position: absolute; left: 50%; top: var(--arc-top); width: 30px; height: 30px; margin-left: -15px; border-radius: 50%;
+  transform: translate(calc(var(--scrub) * var(--arc-x)), calc(var(--scrub) * var(--scrub) * var(--arc-y)));
+  opacity: clamp(0, var(--scrub-on), 1);
+}
+.wo-arc-sun { background: radial-gradient(circle at 42% 38%, #fffbe0, #ffd84a 45%, #ffae1a); box-shadow: 0 0 22px 8px rgba(255,190,50,.55); }
+.wo-arc-moon { background: radial-gradient(circle at 40% 36%, #fffdf2, #efe6c4 60%, #c9bd92); box-shadow: 0 0 20px 6px rgba(240,230,200,.35); }
+.wo-small { --arc-top: 8px; --arc-x: 62px; --arc-y: 56px; }
+.wo-medium { --arc-top: 6px; --arc-x: 150px; --arc-y: 50px; }
+.wo-large { --arc-top: 8px; --arc-x: 150px; --arc-y: 90px; }
+
+/* the pane: flat, frosted, thin enough that the sky's cast comes through */
 .wo-root .wo-pane .go-pane-tint {
   background: linear-gradient(180deg, rgba(var(--go-glass), .2) 0%, rgba(var(--go-glass), .38) 55%, rgba(var(--go-glass), .56) 100%);
 }
@@ -707,43 +764,64 @@ const WO_CSS = `
   background: linear-gradient(180deg, rgba(var(--go-glass), .3) 0%, rgba(var(--go-glass), .46) 55%, rgba(var(--go-glass), .6) 100%);
 }
 
-/* the current conditions */
-.wo-front { position: absolute; inset: 0; }
+/* the native current block; open slides it up and away */
+.wo-current {
+  position: absolute; inset: 0;
+  opacity: clamp(0, calc(1 - var(--open) * 1.7), 1);
+  transform: translateY(calc(var(--open) * -26px));
+}
 .wo-city {
   position: absolute; left: 16px; top: 14px;
   display: flex; align-items: center; gap: 4px;
   font-size: 13px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap;
-  transform: translateY(calc(var(--go-hover) * -1px));
 }
 .wo-arrow { fill: currentColor; }
 .wo-temp {
   position: absolute; left: 14px; top: 30px;
   font-size: 40px; font-weight: 250; line-height: 1; letter-spacing: -.035em;
   font-variant-numeric: tabular-nums; white-space: nowrap;
-  transform-origin: 0 0;
-  transform: translateY(calc(var(--go-hover) * -1px)) scale(calc(1 - var(--go-open) * var(--temp-shrink, .45)));
 }
-.wo-deg { font-weight: 250; }
+.wo-t-scrub { display: none; }
+.wo-temp[data-scrub="1"] .wo-t-now { display: none; }
+.wo-temp[data-scrub="1"] .wo-t-scrub { display: inline; }
+.wo-hour-label {
+  position: absolute; left: 17px; top: 71px;
+  font-size: 10px; font-weight: 600; color: var(--go-ink-soft); white-space: nowrap; letter-spacing: .01em;
+  opacity: clamp(0, var(--scrub-on), 1);
+  transform: translateY(calc((1 - var(--scrub-on)) * -3px));
+}
 .wo-summary { position: absolute; left: 16px; bottom: 14px; display: flex; flex-direction: column; gap: 1px; }
 .wo-cond { font-size: 11px; font-weight: 600; white-space: nowrap; }
 .wo-hl { font-size: 11px; color: var(--go-ink-soft); white-space: nowrap; letter-spacing: 0; }
 
+/* the one-line header it compresses to */
+.wo-header {
+  position: absolute; left: 16px; right: 16px; top: 14px;
+  display: flex; align-items: baseline; gap: 5px; white-space: nowrap; overflow: hidden;
+  font-size: 13px; font-variant-numeric: tabular-nums;
+  opacity: clamp(0, calc((var(--open) - .35) * 1.6), 1);
+  transform: translateY(calc((1 - var(--open)) * 12px));
+}
+.wo-header-city { font-weight: 600; }
+.wo-header-temp { font-weight: 400; }
+.wo-header-dot { color: var(--go-ink-soft); }
+.wo-header-cond { color: var(--go-ink-soft); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+
 /* the sky glyph: a real sun, moon and clouds */
-.wo-sg { position: absolute; width: 28px; height: 28px; transform-origin: 0 0; }
+.wo-sg { position: absolute; width: 28px; height: 28px; }
 .wo-sg-sun, .wo-sg-moon {
   position: absolute; left: 4px; top: 4px; width: 20px; height: 20px; border-radius: 50%;
-  transform: translateY(calc(var(--go-hover) * -4px));
 }
 .wo-sg-sun {
   background: radial-gradient(circle at 40% 36%, #fff6c4 0%, #ffd84a 42%, #ffb81c 100%);
-  box-shadow: 0 0 0 .5px rgba(230,150,0,.3), 0 0 10px 1px rgba(255,190,40,calc(.45 + var(--go-hover) * .25));
+  box-shadow: 0 0 0 .5px rgba(230,150,0,.3), 0 0 10px 1px rgba(255,190,40,.45);
 }
 .wo-sg-moon { background: transparent; box-shadow: inset 6px -3px 0 0 #f1e7c2; filter: drop-shadow(0 0 4px rgba(241,231,194,.4)); }
 .wo-root:not([data-tone="dark"]) .wo-sg-moon { box-shadow: inset 6px -3px 0 0 #c9b97a; }
 .wo-sg-cloudy .wo-sg-sun, .wo-sg-cloudy .wo-sg-moon { left: 2px; top: 1px; width: 16px; height: 16px; }
 .wo-sg-cloud { position: absolute; display: block; overflow: visible; filter: drop-shadow(0 1.5px 2px rgba(30,50,80,.2)); }
-.wo-sg-front { left: 7px; top: 12px; transform: translateX(calc(var(--go-hover) * 4px)); }
-.wo-sg-back { left: -1px; top: 14px; opacity: .85; transform: translateX(calc(var(--go-hover) * -4px)); }
+.wo-sg-front { left: 7px; top: 12px; }
+.wo-sg-back { left: -1px; top: 14px; opacity: .85; }
 .wo-c0 { stop-color: #ffffff; }
 .wo-c1 { stop-color: #dbe3ee; }
 .wo-cloud-edge { stroke: rgba(40,52,70,.16); stroke-width: .5; }
@@ -766,74 +844,73 @@ const WO_CSS = `
 
 /* hourly */
 .wo-hours { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
-.wo-hour { display: flex; flex-direction: column; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.wo-hour { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 6px 0; font-variant-numeric: tabular-nums; }
+.wo-hour::before {
+  content: ""; position: absolute; inset: 0 2px; border-radius: 9px; z-index: -1;
+  background: rgba(var(--go-glass), .7);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.8), 0 0 0 .5px rgba(0,0,0,.06);
+  opacity: 0;
+}
+.wo-root[data-tone="dark"] .wo-hour::before { background: rgba(255,255,255,.1); box-shadow: inset 0 1px 0 rgba(255,255,255,.12); }
+.wo-hour[data-on]::before { opacity: 1; }
 .wo-hour-t { font-size: 10px; font-weight: 500; color: var(--go-ink-soft); white-space: nowrap; }
+.wo-hour[data-on] .wo-hour-t { color: var(--go-ink); }
 .wo-hour-v { font-size: 11px; font-weight: 600; white-space: nowrap; }
 
-/* the pocket the forecast rises out of */
-.wo-pocket { position: absolute; inset: 0; border-radius: 24px; overflow: hidden; }
-.wo-chip, .wo-sheet-slot { position: absolute; left: 0; top: 0; }
-.wo-chip {
-  box-sizing: border-box; border-radius: 9px;
-  display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 5px 0;
-  background: linear-gradient(180deg, rgba(var(--go-glass), .92), rgba(var(--go-glass), .78));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.85), 0 0 0 .5px rgba(0,0,0,.1), 0 6px 12px -6px var(--go-shadow);
-  font-variant-numeric: tabular-nums;
-}
-.wo-root[data-tone="dark"] .wo-chip { background: linear-gradient(180deg, rgba(58,58,64,.94), rgba(40,40,46,.9)); box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 0 0 .5px rgba(255,255,255,.12), 0 6px 14px -6px var(--go-shadow); }
-.wo-chip-t { font-size: 9px; font-weight: 500; letter-spacing: -.06em; color: var(--go-ink-soft); white-space: nowrap; }
-.wo-chip-v { font-size: 10.5px; font-weight: 600; }
-
-/* small */
-.wo-small .wo-now-glyph {
-  left: 14px; top: 84px;
-  transform: translate(calc(var(--go-open) * 113px), calc(var(--go-open) * -71px)) scale(calc(1 - var(--go-open) * .15));
-}
-.wo-small .wo-temp { --temp-shrink: .45; }
-
-/* medium */
-.wo-medium .wo-now-glyph { left: 14px; top: 84px; }
-.wo-medium .wo-temp { --temp-shrink: .1; }
-.wo-flip { position: absolute; left: 160px; right: 10px; top: 12px; bottom: 12px; perspective: 700px; }
-.wo-spin { position: absolute; inset: 0; transform-style: preserve-3d; transform: rotateX(calc(var(--plaque) * -180deg)); }
-.wo-face {
-  position: absolute; inset: 0; border-radius: 14px;
-  -webkit-backface-visibility: hidden; backface-visibility: hidden;
-  display: grid; align-content: center;
-}
-/* a glass plate shows only while it turns, and stays behind the outlook */
-.wo-face-front { background: rgba(var(--go-glass), calc(sin(var(--plaque) * 180deg) * .6)); }
-.wo-face-back {
-  transform: rotateX(180deg);
-  background: linear-gradient(180deg, rgba(var(--go-glass), .72), rgba(var(--go-glass), .56));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.8), 0 0 0 .5px rgba(0,0,0,.08), 0 8px 16px -10px var(--go-shadow);
-}
-.wo-root[data-tone="dark"] .wo-face-back { box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 0 0 .5px rgba(255,255,255,.1), 0 8px 16px -10px var(--go-shadow); }
-.wo-face .wo-hours { padding: 0 4px; }
-.wo-days { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.wo-day-t { color: var(--go-ink); font-weight: 600; }
-.wo-days .wo-hour { gap: 5px; }
-.wo-days .wo-hour-v { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.wo-day-lo { font-size: 10px; font-weight: 500; color: var(--go-ink-soft); }
-
-/* large */
-.wo-large .wo-now-glyph { left: auto; right: 16px; top: 14px; transform: translateY(calc(var(--go-open) * -2px)); }
-.wo-large .wo-temp { --temp-shrink: .2; }
-.wo-large .wo-summary { left: auto; right: 16px; top: 48px; bottom: auto; align-items: flex-end; }
-.wo-hourly-large {
-  position: absolute; left: 10px; right: 10px; top: 92px; height: 64px;
-  display: grid; align-content: center;
-  border-top: .5px solid var(--go-ink-faint);
-  transform: translateY(calc(var(--go-open) * -8px));
-}
-.wo-list { list-style: none; margin: 0; padding: 0; position: absolute; left: 16px; right: 16px; top: 172px; border-top: .5px solid var(--go-ink-faint); }
-.wo-row { height: 28px; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+/* day rows */
+.wo-list { list-style: none; margin: 0; padding: 0; position: absolute; }
+.wo-row { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
 .wo-row-day { width: 44px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .wo-row-lo, .wo-row-hi { width: 26px; font-size: 12px; font-weight: 500; }
 .wo-row-lo { text-align: right; color: var(--go-ink-soft); }
 .wo-row-hi { font-weight: 600; }
 .wo-bar { position: relative; flex: 1; height: 4px; border-radius: 4px; background: var(--go-ink-faint); }
-.wo-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.wo-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; transform-origin: 0 50%; }
 .wo-bar-dot { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1.5px rgba(0,0,0,.35); transform: translate(-50%, -50%); }
-.wo-root .wo-sheet { position: absolute; inset: 0; border-radius: 9px; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-variant-numeric: tabular-nums; }
+
+/* rows that come in on open: they rise (or slide) in, and the bar draws itself */
+.wo-row-in { --r: 0; height: 20px; opacity: clamp(0, calc(var(--r) * 1.6 - .2), 1); }
+.wo-row-in .wo-bar-fill { transform: scaleX(clamp(0, calc(var(--r) * 1.15 - .15), 1.04)); }
+.wo-row-in .wo-bar-dot { opacity: clamp(0, calc(var(--r) * 3 - 2), 1); }
+
+/* small */
+.wo-small .wo-now-glyph { left: 14px; top: 84px; }
+.wo-list-small { left: 12px; right: 12px; top: 0; bottom: 0; }
+.wo-list-small .wo-row { gap: 5px; transform: translateY(calc((1 - var(--r)) * 140px)); }
+.wo-list-small .wo-row-day { width: 32px; font-size: 10.5px; }
+.wo-list-small .wo-glyph { width: 14px; height: 14px; }
+.wo-list-small .wo-row-lo, .wo-list-small .wo-row-hi { width: 19px; font-size: 10.5px; }
+
+/* medium */
+.wo-medium .wo-now-glyph { left: 14px; top: 84px; }
+.wo-hourly-medium { position: absolute; left: 160px; right: 10px; top: 12px; bottom: 12px; overflow: hidden; display: grid; align-content: center; }
+.wo-track { width: 200%; grid-template-columns: repeat(12, minmax(0, 1fr)); transform: translateX(calc(var(--open) * -50%)); }
+.wo-list-medium { left: 14px; width: 140px; top: 0; bottom: 0; }
+.wo-list-medium .wo-row { gap: 5px; transform: translateX(calc((1 - var(--r)) * -160px)); }
+.wo-list-medium .wo-row-day { width: 28px; font-size: 10.5px; }
+.wo-list-medium .wo-glyph { width: 15px; height: 15px; }
+.wo-list-medium .wo-row-lo, .wo-list-medium .wo-row-hi { width: 19px; font-size: 10.5px; }
+
+/* large */
+.wo-large .wo-now-glyph { left: auto; right: 16px; top: 14px; }
+.wo-large .wo-summary { left: auto; right: 16px; top: 48px; bottom: auto; align-items: flex-end; }
+.wo-large .wo-hour-label { top: 74px; left: 18px; }
+.wo-hourly-large {
+  position: absolute; left: 10px; right: 10px; top: 92px; height: 64px;
+  display: grid; align-content: center;
+  border-top: .5px solid var(--go-ink-faint);
+  opacity: clamp(0, calc(1 - var(--open) * 2), 1);
+  transform: translateY(calc(var(--open) * -30px));
+}
+.wo-list-large { left: 16px; right: 16px; top: 0; bottom: 0; }
+.wo-list-large::before { content: ""; position: absolute; left: 0; right: 0; top: 172px; border-top: .5px solid var(--go-ink-faint); opacity: calc(1 - var(--open)); }
+.wo-row-grow { --r: 0; height: 28px; transform: translateY(calc(var(--r) * var(--dy))); }
+.wo-mini {
+  position: absolute; left: 52px; right: 0; top: 25px; height: 18px;
+  display: flex; justify-content: space-between;
+  font-size: 9.5px; color: var(--go-ink-soft); white-space: nowrap;
+  opacity: clamp(0, calc(var(--r) * 1.6 - .5), 1);
+  transform: translateY(calc((1 - var(--r)) * -8px));
+}
+.wo-mini i { font-style: normal; margin-right: 3px; opacity: .65; }
 `
