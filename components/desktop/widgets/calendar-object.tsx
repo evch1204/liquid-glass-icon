@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { GlassObject, GlassPane, GlassSheet, LIQUIDS, LiquidCanvas, useGlass, useSpringVar, type LiquidRecipe } from "@/components/ui/glass-object"
+import { GlassObject, GlassPane, LIQUIDS, LiquidCanvas, useGlass, useSpringVar, type LiquidRecipe } from "@/components/ui/glass-object"
 import { rng } from "@/components/ui/glass-folder-cards"
 import { WIDGET, type WidgetSize } from "../glass"
 import { APPS } from "@/lib/apps"
@@ -10,28 +10,30 @@ import { useWindowManager } from "../window-manager"
 /**
  * Calendar — the macOS Calendar widget, with a real page in it.
  *
- * At rest it reads exactly as the native widget: one frosted card over a
+ * At rest it reads exactly as the native widget: one flat frosted card over a
  * paper-warm liquid light, the weekday in Calendar red over a light day
  * number, the next events with coloured dots, and (wider sizes) the month.
  * The one difference is that the date is printed on a page: a white sheet
  * with a hair of paper edge, lying on the glass.
  *
- * - **Hover**: the card leans back and lifts; the thumb catches the page's
- *   bottom-right corner and `--curl` lifts it — the page is cut along a
- *   diagonal and the back of the paper folds over as a flap with its own
- *   shadow; the events list lifts 2px.
+ * Everything happens inside the card. The card never changes size or shape,
+ * nothing leaves its frame, and only the page moves.
+ *
+ * - **Hover**: the thumb catches the page's bottom-right corner and `--curl`
+ *   lifts it toward the pointer — the page is cut along a diagonal and the
+ *   back of the paper folds over as a flap with its own shadow.
  * - **Press**: the thumb flattens the curl and the page dips; on release the
  *   corner springs back past where it was, then settles.
  * - **Open** (click): the corner is grabbed (`--curl` → 1), then the page flips
- *   (`--flip`) up about its top edge, bending like paper on the way, and ends
- *   leaning back past vertical as a sliver of its ruled Notes side. Under it:
- *   the rest of today and this week. Medium raises today's events as chips;
- *   large fans the day's events out as sheets. The card only drops a little.
+ *   (`--flip`) up about its own top edge, bending like paper on the way, to
+ *   85° — standing almost on edge, never rising past its hinge — and casts its
+ *   shadow on what it uncovered: the agenda (and on medium the week), whose
+ *   rows settle into the page's footprint one after another, 40 ms apart.
  * - **Close**: the page slaps down, overshoots a few degrees, and drops again;
  *   its shadow sharpens on impact.
  * - **Midnight**: if the date changes while the widget is on the desk, the
- *   page tears off along its perforation and falls away; the new date is
- *   underneath.
+ *   page tears off along its perforation and falls out of the frame; the new
+ *   date is underneath.
  * - **Activate** (double-click, Enter): the Calendar app.
  *
  * The date is read only after mount, so server and client markup agree; the
@@ -204,14 +206,15 @@ function nextEvents(today: Today, n: number): CalEvent[] {
 }
 
 // ---------------------------------------------------------------------------
-// Geometry: where the page lies on the card, and how far it turns when open.
+// Geometry: where the page lies on the card. It turns 85° about its top edge,
+// so even fully open it never rises past its hinge and never leaves the card.
 
-type Geo = { x: number; y: number; w: number; h: number; deg: number }
+type Geo = { x: number; y: number; w: number; h: number }
 
 const GEO: Record<WidgetSize, Geo> = {
-  small: { x: 10, y: 10, w: 150, h: 74, deg: 100 },
-  medium: { x: 10, y: 10, w: 150, h: 150, deg: 96 },
-  large: { x: 12, y: 12, w: 156, h: 114, deg: 100 },
+  small: { x: 10, y: 10, w: 150, h: 74 },
+  medium: { x: 10, y: 10, w: 150, h: 150 },
+  large: { x: 12, y: 12, w: 156, h: 114 },
 }
 
 const PAPER: LiquidRecipe = { colors: ["#ece8e1", "#f7f4ef", "#ffffff", "#efebe4"], gloss: 0.5 }
@@ -225,6 +228,8 @@ const PERFORATION = (() => {
 })()
 
 const NBSP = " "
+/** Rows that settle in under the page, one spring each. */
+const ROWS = 6
 
 // ---------------------------------------------------------------------------
 // Small pieces
@@ -267,16 +272,12 @@ function Front({ today, size }: { today: Today | null; size: WidgetSize }) {
   )
 }
 
-/** The page: front, ruled Notes back, the curled corner's flap. */
+/** The page: its front and the curled corner's flap. */
 function Leaf({ today, size }: { today: Today | null; size: WidgetSize }) {
   return (
     <div className="cal-leaf" aria-hidden="true">
       <div className="cal-sheet">
         <Front today={today} size={size} />
-        <span className="cal-ghost">{today ? today.d : NBSP}</span>
-        <div className="cal-notes">
-          <span className="cal-notes-h">Notes</span>
-        </div>
       </div>
       <div className="cal-flaphost">
         <div className="cal-flap" />
@@ -285,7 +286,7 @@ function Leaf({ today, size }: { today: Today | null; size: WidgetSize }) {
   )
 }
 
-/** Yesterday's page, torn off along its perforation and falling in rAF physics. */
+/** Yesterday's page, torn off along its perforation and falling in rAF physics, out of the card. */
 function Torn({ day, size, onDone }: { day: Today; size: WidgetSize; onDone: () => void }) {
   const ref = React.useRef<HTMLDivElement>(null)
   const done = React.useRef(onDone)
@@ -329,10 +330,10 @@ function Torn({ day, size, onDone }: { day: Today; size: WidgetSize; onDone: () 
 }
 
 /** This week, Sunday first, with a dot on days that have events. */
-function Week({ today }: { today: Today }) {
+function Week({ today, n }: { today: Today; n: number }) {
   const start = addDays(today, -weekdayOf(today))
   return (
-    <div className="cal-week">
+    <div className="cal-week cal-settle" style={{ "--nl": `var(--n${n})` } as React.CSSProperties}>
       {Array.from({ length: 7 }, (_, i) => {
         const d = addDays(start, i)
         const has = eventsOn(d, today).length > 0
@@ -348,43 +349,40 @@ function Week({ today }: { today: Today }) {
   )
 }
 
-/** What the page was covering: the rest of today (then the coming days) and this week. */
+/** One agenda row: when, a coloured bar, what. It settles in on its own spring. */
+function Row({ e, today, n }: { e: CalEvent; today: Today; n: number }) {
+  const isToday = same(e, today)
+  return (
+    <div className="cal-row cal-settle" style={{ "--c": COLOR[e.cal], "--nl": `var(--n${n})` } as React.CSSProperties}>
+      <span className="cal-row-time go-mono">{isToday ? timeLabel(e, true) : WEEKDAYS[weekdayOf(e)].slice(0, 3) + " " + e.d}</span>
+      <span className="cal-row-bar" />
+      <span className="cal-row-title">{e.title}</span>
+    </div>
+  )
+}
+
+/** What the page was covering, in exactly the page's footprint. */
 function Under({ today, size }: { today: Today | null; size: WidgetSize }) {
   if (!today) return <div className="cal-under" />
   if (size === "medium") {
     const ev = eventsOn(today, today).slice(0, 3)
     return (
       <div className="cal-under" aria-hidden="true">
-        <Week today={today} />
-        <div className="cal-chips">
-          {ev.map((e, i) => (
-            <GlassSheet key={e.id} className="cal-chip" style={{ "--c": COLOR[e.cal], "--nl": `var(--n${i})` } as React.CSSProperties}>
-              <span className="cal-chip-bar" />
-              <span className="cal-chip-title">{e.title}</span>
-              <span className="cal-chip-time go-mono">{timeLabel(e, true)}</span>
-            </GlassSheet>
-          ))}
-        </div>
+        <Week today={today} n={0} />
+        {ev.length ? null : <span className="cal-none go-soft">Nothing today</span>}
+        {ev.map((e, i) => (
+          <Row key={e.id} e={e} today={today} n={i + 1} />
+        ))}
       </div>
     )
   }
-  const rows = nextEvents(today, 4)
+  const rows = nextEvents(today, size === "large" ? 6 : 4)
   return (
     <div className="cal-under" aria-hidden="true">
-      <div className="cal-agenda">
-        {rows.length ? null : <span className="cal-none go-soft">Nothing coming up</span>}
-        {rows.map((e) => {
-          const isToday = same(e, today)
-          return (
-            <div key={e.id} className="cal-row" style={{ "--c": COLOR[e.cal] } as React.CSSProperties}>
-              <span className="cal-row-time go-mono">{isToday ? timeLabel(e, true) : WEEKDAYS[weekdayOf(e)].slice(0, 3) + " " + e.d}</span>
-              <span className="cal-row-bar" />
-              <span className="cal-row-title">{e.title}</span>
-            </div>
-          )
-        })}
-      </div>
-      <Week today={today} />
+      {rows.length ? null : <span className="cal-none go-soft">Nothing coming up</span>}
+      {rows.map((e, i) => (
+        <Row key={e.id} e={e} today={today} n={i} />
+      ))}
     </div>
   )
 }
@@ -432,33 +430,21 @@ function SmallList({ today }: { today: Today | null }) {
   )
 }
 
-/** Large: the day's events beside the page; open fans them out as sheets. */
+/** Large: the day's events beside the page. */
 function LargeList({ today }: { today: Today | null }) {
   const ev = today ? eventsOn(today, today).slice(0, 4) : []
   return (
-    <>
-      <div className="cal-list cal-list-l" aria-hidden="true">
-        <span className="cal-list-h go-soft">Today</span>
-        {today && !ev.length ? <span className="cal-none go-soft">No events</span> : null}
-        {ev.map((e) => (
-          <EventLine key={e.id} e={e} where past={!!today && e.start !== null && e.start + e.dur <= today.minutes} />
-        ))}
-      </div>
-      <div className="cal-fan" aria-hidden="true">
-        {ev.map((e, i) => (
-          <GlassSheet key={e.id} className="cal-fan-sheet" style={{ "--i": i, "--mid": (ev.length - 1) / 2, "--c": COLOR[e.cal], "--nl": `var(--n${i})` } as React.CSSProperties}>
-            <span className="cal-chip-bar" />
-            <span className="cal-fan-time go-mono">{timeLabel(e, true)}</span>
-            <span className="cal-chip-title">{e.title}</span>
-            {e.where ? <span className="cal-fan-where go-soft">{e.where}</span> : null}
-          </GlassSheet>
-        ))}
-      </div>
-    </>
+    <div className="cal-list cal-list-l" aria-hidden="true">
+      <span className="cal-list-h go-soft">Today</span>
+      {today && !ev.length ? <span className="cal-none go-soft">No events</span> : null}
+      {ev.map((e) => (
+        <EventLine key={e.id} e={e} where past={!!today && e.start !== null && e.start + e.dur <= today.minutes} />
+      ))}
+    </div>
   )
 }
 
-/** The page, what lies under it, its shadow, and yesterday's page if it is falling. */
+/** The page, what lies under it, the shadows, and yesterday's page if it is falling. */
 function Page({ today, size }: { today: Today | null; size: WidgetSize }) {
   const g = GEO[size]
   // the page that was today, kept just long enough to tear it off
@@ -469,8 +455,9 @@ function Page({ today, size }: { today: Today | null; size: WidgetSize }) {
     setShown(today)
   }
   return (
-    <div className="cal-page" style={{ left: g.x, top: g.y, width: g.w, height: g.h, "--deg": g.deg + "deg" } as React.CSSProperties}>
+    <div className="cal-page" style={{ left: g.x, top: g.y, width: g.w, height: g.h } as React.CSSProperties}>
       <Under today={today} size={size} />
+      <div className="cal-castshadow" aria-hidden="true" />
       <div className="cal-leafshadow" aria-hidden="true" />
       <Leaf today={today} size={size} />
       {torn ? <Torn key={`${torn.y}-${torn.m}-${torn.d}`} day={torn} size={size} onDone={() => setTorn(null)} /> : null}
@@ -486,10 +473,12 @@ function Card({ today, size }: { today: Today | null; size: WidgetSize }) {
   const wrap = React.useRef<HTMLDivElement>(null)
   const curl = useSpringVar(wrap, "--curl", 0, 140, 12)
   const flip = useSpringVar(wrap, "--flip", 0, 60, 9)
-  const n0 = useSpringVar(wrap, "--n0", 0, 150, 14)
-  const n1 = useSpringVar(wrap, "--n1", 0, 150, 14)
-  const n2 = useSpringVar(wrap, "--n2", 0, 150, 14)
-  const n3 = useSpringVar(wrap, "--n3", 0, 150, 14)
+  const n0 = useSpringVar(wrap, "--n0", 0, 170, 18)
+  const n1 = useSpringVar(wrap, "--n1", 0, 170, 18)
+  const n2 = useSpringVar(wrap, "--n2", 0, 170, 18)
+  const n3 = useSpringVar(wrap, "--n3", 0, 170, 18)
+  const n4 = useSpringVar(wrap, "--n4", 0, 170, 18)
+  const n5 = useSpringVar(wrap, "--n5", 0, 170, 18)
   const was = React.useRef({ open: false, pressed: false })
   const timers = React.useRef<number[]>([])
 
@@ -497,7 +486,7 @@ function Card({ today, size }: { today: Today | null; size: WidgetSize }) {
     const prev = was.current
     was.current = { open, pressed }
     const later = (ms: number, fn: () => void) => timers.current.push(window.setTimeout(fn, ms))
-    const sheets = [n0, n1, n2, n3]
+    const rows = [n0, n1, n2, n3, n4, n5].slice(0, ROWS)
     if (open !== prev.open) {
       // a new order of events: whatever the last one had queued is dropped
       timers.current.forEach((t) => window.clearTimeout(t))
@@ -508,13 +497,13 @@ function Card({ today, size }: { today: Today | null; size: WidgetSize }) {
         // …then the page goes over, straightening as it travels
         later(80, () => flip(1, { k: 60, c: 9 }))
         later(220, () => curl(0, { k: 90, c: 13 }))
-        // and what it uncovered rises, one after another
-        sheets.forEach((n, i) => later(230 + i * 70, () => n(1, { k: 150, c: 13 })))
+        // and what it uncovered settles into place, row by row
+        rows.forEach((n, i) => later(240 + i * 40, () => n(1)))
       } else {
         // the slap: stiff and underdamped, so it lands, bounces, lands
         flip(0, { k: 120, c: 9 })
+        rows.forEach((n) => n(0, { k: 300, c: 30 }))
         later(320, () => curl(hover ? 0.35 : 0, { k: 140, c: 12 }))
-        sheets.forEach((n) => n(0, { k: 260, c: 26 }))
       }
       return
     }
@@ -522,14 +511,14 @@ function Card({ today, size }: { today: Today | null; size: WidgetSize }) {
     if (pressed) curl(0.15, { k: 420, c: 30 })
     else if (prev.pressed) curl(hover ? 0.35 : 0, { k: 140, c: 9 })
     else curl(hover ? 0.35 : 0, { k: 140, c: 12 })
-  }, [open, pressed, hover, curl, flip, n0, n1, n2, n3])
+  }, [open, pressed, hover, curl, flip, n0, n1, n2, n3, n4, n5])
 
   React.useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), [])
 
   return (
     <div ref={wrap} className="cal-body" data-ready={today ? "true" : undefined}>
-      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : PAPER} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 48 : 80} />
-      <GlassPane hinge="bottom" lean={-9} openLean={-18} openShift={6} openFade={0.35} frost={0.9} radius={22} drive={{ open: "--flip" }} className="cal-card">
+      <LiquidCanvas recipe={tone === "dark" ? LIQUIDS.smoke : PAPER} seed={size === "small" ? 3 : size === "medium" ? 6 : 9} cells={size === "small" ? 72 : 120} />
+      <GlassPane hinge="none" lean={0} openLean={0} openShift={0} openFade={0} frost={0.9} radius={22} className="cal-card">
         {size === "small" ? <SmallList today={today} /> : null}
         {size === "medium" ? <Month today={today} className="cal-month-m" /> : null}
         {size === "large" ? (
@@ -556,8 +545,8 @@ export function CalendarWidget({ size = "small", className, appearDelay = 0 }: {
       tone={tone}
       label={label}
       radius={22}
-      tilt={4}
-      pivot="base"
+      tilt={2}
+      hoverLift={0}
       appearDelay={appearDelay}
       className={"cal-root cal-" + size + (className ? " " + className : "")}
       onActivate={() => open("calendar", { singleton: "app", title: APPS.calendar.name, w: 760, h: 540 })}
@@ -585,24 +574,26 @@ const CAL_CSS = `
   --paper-fold: #141416;
   --paper-edge: #121214;
 }
-.cal-root .go-tilt { border-radius: 22px; }
+/* the card keeps its size and shape: only the engine's faint tilt, no lift, no squash */
+.cal-root .go-tilt {
+  border-radius: 22px;
+  transform:
+    perspective(1200px)
+    rotateX(calc(var(--go-py) * var(--go-tilt) * -1 * var(--go-hover)))
+    rotateY(calc(var(--go-px) * var(--go-tilt) * var(--go-hover)));
+}
 .cal-root .go-liquid { border-radius: 22px; }
 
-/* every spring the widget uses lives here, so every child can read it */
+/* every spring the widget uses lives here, so every child can read it; nothing leaves this frame */
 .cal-body {
-  position: absolute; inset: 0; border-radius: 22px;
-  --curl: 0; --flip: 0; --flip-v: 0; --n0: 0; --n1: 0; --n2: 0; --n3: 0;
+  position: absolute; inset: 0; border-radius: 22px; overflow: hidden;
+  --curl: 0; --flip: 0; --flip-v: 0; --n0: 0; --n1: 0; --n2: 0; --n3: 0; --n4: 0; --n5: 0;
   /* the paper bend peaks mid-flip: 4·f·(1−f) */
   --bend: max(0, 4 * var(--flip) * (1 - var(--flip)));
   /* past flat, the slap only goes a few degrees: 1/8 of the spring's undershoot */
   --fa: max(var(--flip), var(--flip) * .125);
-  /* which face of the page is toward you: edge-on at 90° */
-  --front: clamp(0, (.9 - var(--flip)) * 1000, 1);
-  --backv: clamp(0, (var(--flip) - .9) * 1000, 1);
   /* how hard the page is landing */
   --slap: clamp(0, var(--flip-v) * -.13, 1);
-  /* how far the uncovered things have come up */
-  --shown: clamp(0, (var(--flip) - .4) * 2.4, 1);
 }
 .cal-body:not([data-ready]) .go-pane-body > * { visibility: hidden; }
 .cal-card { inset: 0; }
@@ -622,7 +613,7 @@ const CAL_CSS = `
 
 /* ---- the page ---- */
 .cal-page { position: absolute; }
-.cal-leaf, .cal-leafshadow, .cal-torn, .cal-under { position: absolute; inset: 0; }
+.cal-leaf, .cal-leafshadow, .cal-torn, .cal-under, .cal-castshadow { position: absolute; inset: 0; }
 
 /* its paper edge and shadow on the glass: soft at rest, sharp on the slap */
 .cal-leafshadow {
@@ -632,6 +623,14 @@ const CAL_CSS = `
     0 calc(2px - var(--slap) * 1.2px) calc(5px - var(--slap) * 4px) rgba(16, 18, 24, calc(.1 + var(--slap) * .4));
   opacity: calc(1 - min(1, max(0, var(--flip)) * 5));
 }
+/* the raised page's shadow on what it uncovered: long while it is low over the rows, short once it stands */
+.cal-castshadow {
+  bottom: auto; border-radius: 9px 9px 0 0; pointer-events: none;
+  height: calc(10px + var(--bend) * 40px);
+  background: linear-gradient(180deg, rgba(16, 18, 24, .22), rgba(16, 18, 24, .08) 45%, rgba(16, 18, 24, 0));
+  opacity: clamp(0, var(--flip) * 3, 1);
+}
+.cal-root[data-tone="dark"] .cal-castshadow { background: linear-gradient(180deg, rgba(0,0,0,.5), rgba(0,0,0,.15) 45%, rgba(0,0,0,0)); }
 .cal-leaf {
   z-index: 2;
   /* the curl: a corner cut of size s, at 45° ± 10° with the pointer */
@@ -639,48 +638,37 @@ const CAL_CSS = `
   --a: calc(45deg + var(--go-py) * 10deg);
   --sx: calc(var(--s) * 1.4142 * sin(var(--a)));
   --sy: calc(var(--s) * 1.4142 * cos(var(--a)));
+  /* hinged on its own top edge, inside the card; 85° leaves it a sliver below the hinge, never above */
   transform-origin: 50% 0;
   transform:
     translateY(calc(var(--go-press) * .5px - var(--go-hover) * (1 - min(1, max(0, var(--flip)) * 4)) * 1px))
     perspective(500px)
-    rotateX(calc(var(--fa) * var(--deg) * -1))
-    rotateZ(calc(var(--bend) * -6deg))
+    rotateX(calc(var(--fa) * -85deg))
+    rotateZ(calc(var(--bend) * -4deg))
     skewX(calc(var(--bend) * 3deg));
 }
 .cal-sheet {
   position: absolute; inset: 0; overflow: hidden; border-radius: 9px;
   /* light through paper: once it lifts, the page lets the liquid through */
-  background: rgba(var(--paper), calc(var(--paper-a) - min(1, max(0, var(--flip)) * 3) * .12));
+  background: rgba(var(--paper), calc(var(--paper-a) - min(1, max(0, var(--flip)) * 3) * .05));
   -webkit-backdrop-filter: blur(6px) brightness(1.08);
   backdrop-filter: blur(6px) brightness(1.08);
   box-shadow: inset 0 0 0 .5px rgba(0, 0, 0, .05), inset 0 1px 0 rgba(255, 255, 255, .7);
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - var(--sy)), calc(100% - var(--sx)) 100%, 0 100%);
 }
+/* standing up, the page catches less light */
+.cal-sheet::after { content: ""; position: absolute; inset: 0; background: rgba(16, 18, 24, calc(max(0, var(--flip)) * .12)); pointer-events: none; }
 .cal-root[data-tone="dark"] .cal-sheet { box-shadow: inset 0 0 0 .5px rgba(255,255,255,.07), inset 0 1px 0 rgba(255,255,255,.1); }
 .cal-front {
   position: absolute; inset: 0; padding: 9px 11px 10px;
   display: flex; flex-direction: column; align-items: flex-start;
-  opacity: var(--front);
 }
 .cal-front-next { margin-top: auto; width: 100%; padding-top: 8px; border-top: .5px solid var(--go-ink-faint); }
-.cal-ghost {
-  position: absolute; left: 9.5px; top: calc(9px + 12px);
-  font-size: 44px; font-weight: 300; letter-spacing: -.02em; line-height: .95; color: var(--go-ink);
-  opacity: calc(var(--backv) * .07);
-}
-.cal-notes {
-  position: absolute; inset: 0; transform: scaleY(-1); opacity: var(--backv);
-  padding: 7px 10px;
-  background: repeating-linear-gradient(180deg, transparent 0 13px, rgba(10, 132, 255, .18) 13px 14px);
-  background-position: 0 10px;
-}
-.cal-notes-h { font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #ff3b30; }
 
 /* the curled corner: the back of the paper folded over the page */
 .cal-flaphost {
   position: absolute; inset: 0; pointer-events: none;
   filter: drop-shadow(calc(var(--go-px) * 3px - .5px) calc(.8px + var(--curl) * 1.6px) calc(.8px + var(--curl) * 2.5px) rgba(16, 18, 24, .26));
-  opacity: var(--front);
 }
 .cal-flap {
   position: absolute; right: 0; bottom: 0; width: var(--sx); height: var(--sy);
@@ -690,18 +678,17 @@ const CAL_CSS = `
   background: linear-gradient(to bottom right, transparent 49.5%, var(--paper-fold) 50%, var(--paper-back) 72%, rgba(var(--paper), .95) 100%);
 }
 
-/* yesterday, falling */
+/* yesterday, falling out of the frame */
 .cal-torn { z-index: 3; overflow: hidden; border-radius: 0 0 9px 9px; background: rgb(var(--paper)); box-shadow: 0 4px 10px -2px rgba(16,18,24,.3); transform-origin: 30% 10%; }
-.cal-torn .cal-front { opacity: 1; }
 
-/* ---- what the page was covering ---- */
-.cal-under { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px 0; opacity: var(--shown); transform: translateY(calc((1 - var(--shown)) * 4px)); }
-.cal-agenda { display: flex; flex-direction: column; gap: 1px; }
-.cal-row { display: grid; grid-template-columns: 38px 2px 1fr; align-items: center; column-gap: 6px; height: 16px; min-width: 0; }
+/* ---- what the page was covering, settling into its footprint ---- */
+.cal-under { display: flex; flex-direction: column; gap: 2px; padding: 8px 4px 0; }
+.cal-settle { opacity: clamp(0, var(--nl) * 1.4 - .2, 1); transform: translateY(calc((1 - var(--nl)) * 7px)); }
+.cal-row { display: grid; grid-template-columns: 38px 2.5px 1fr; align-items: center; column-gap: 6px; height: 15px; min-width: 0; }
 .cal-row-time { font-size: 10px; color: var(--go-ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: 0; }
 .cal-row-bar { width: 2.5px; height: 12px; border-radius: 2px; background: var(--c); }
 .cal-row-title { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--go-ink); }
-.cal-week { display: grid; grid-template-columns: repeat(7, 1fr); padding-top: 5px; border-top: .5px solid var(--go-ink-faint); }
+.cal-week { display: grid; grid-template-columns: repeat(7, 1fr); padding-bottom: 6px; margin-bottom: 4px; border-bottom: .5px solid var(--go-ink-faint); }
 .cal-wk { display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
 .cal-wk-l { font-size: 9px; font-weight: 600; color: var(--go-ink-soft); }
 .cal-wk-n { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--go-ink); }
@@ -709,45 +696,15 @@ const CAL_CSS = `
 .cal-wk-dot { width: 3px; height: 3px; border-radius: 50%; margin-top: 1px; background: var(--go-ink-soft); }
 .cal-wk-now .cal-wk-dot { background: #ff3b30; }
 .cal-wk-none { visibility: hidden; }
-
-/* medium: today's events rise as chips */
-.cal-medium .cal-under { padding-top: 6px; }
-.cal-medium .cal-week { order: -1; border-top: 0; padding-top: 0; padding-bottom: 6px; border-bottom: .5px solid var(--go-ink-faint); }
-.cal-chips { position: relative; flex: 1; }
-.cal-chip {
-  position: relative; display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 6px;
-  height: 28px; margin-bottom: 5px; padding: 0 8px 0 12px; border-radius: 9px; color: var(--go-ink);
-  opacity: clamp(0, var(--nl) * 1.6, 1);
-  transform: translateY(calc((1 - var(--nl)) * 16px)) scale(calc(.94 + var(--nl) * .06));
-}
-.cal-chip-bar { position: absolute; left: 5px; top: 7px; bottom: 7px; width: 2.5px; border-radius: 2px; background: var(--c); }
-.cal-chip-title { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cal-chip-time { font-size: 10px; color: var(--go-ink-soft); white-space: nowrap; letter-spacing: 0; }
+.cal-medium .cal-under { padding-top: 17px; gap: 6px; }
+.cal-medium .cal-row { height: 18px; }
+.cal-large .cal-under { padding-top: 13px; gap: 1.5px; }
 
 /* ---- the lists on the glass ---- */
-.cal-list {
-  position: absolute; display: flex; flex-direction: column; gap: 6px;
-  transform: translateY(calc(var(--go-hover) * -2px + var(--flip) * 6px));
-  opacity: calc(1 - var(--shown));
-}
+.cal-list { position: absolute; display: flex; flex-direction: column; gap: 6px; }
 .cal-small .cal-list { left: 12px; right: 12px; top: 96px; }
 .cal-list-l { left: 184px; right: 14px; top: 13px; gap: 5px; }
 .cal-list-h { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-.cal-fan { position: absolute; left: 180px; right: 12px; top: 10px; height: 130px; pointer-events: none; }
-.cal-fan-sheet {
-  left: 0; right: 4px; height: 28px; top: calc(4px + var(--i) * 31px);
-  display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 6px; align-content: center;
-  padding: 0 8px 0 12px; border-radius: 9px; color: var(--go-ink);
-  opacity: clamp(0, var(--nl) * 1.6, 1);
-  transform-origin: 0% 50%;
-  transform:
-    translate(calc(var(--nl) * (var(--i) - var(--mid)) * 3px), calc(var(--nl) * (var(--i) - var(--mid)) * 4px + (1 - var(--nl)) * 10px))
-    rotate(calc(var(--nl) * (var(--i) - var(--mid)) * 2.2deg));
-}
-.cal-fan-time { font-size: 10px; color: var(--go-ink-soft); letter-spacing: 0; grid-row: 1 / span 2; align-self: center; }
-.cal-fan-sheet .cal-chip-title { grid-column: 2; }
-.cal-fan-where { font-size: 9.5px; grid-column: 2; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cal-fan-sheet:has(.cal-fan-where) { height: 32px; }
 
 /* ---- the month ---- */
 .cal-month { position: absolute; display: flex; flex-direction: column; color: var(--go-ink); }
@@ -766,5 +723,4 @@ const CAL_CSS = `
 .cal-month-l .cal-month-wd { padding-bottom: 3px; border-bottom: .5px solid var(--go-ink-faint); }
 .cal-month-l .cal-cell-n { width: 22px; height: 22px; font-size: 11px; }
 .cal-large .cal-num { font-size: 52px; }
-.cal-large .cal-ghost { font-size: 52px; }
 `
